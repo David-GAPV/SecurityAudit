@@ -1,0 +1,391 @@
+{% extends "base.html" %}
+{% block title %}Compliance Dashboard{% endblock %}
+
+{% block content %}
+<h1 class="page-title">Compliance</h1>
+
+<!-- Top Stats Row -->
+<div class="stats-row">
+    <!-- Posture Score Gauge -->
+    <div class="card gauge-card">
+        <div class="card-header">
+            <span>Current Posture Score</span>
+            <span class="info-icon" title="Overall percentage of passed checks across all frameworks">&#9432;</span>
+        </div>
+        <div class="gauge-wrapper">
+            <canvas id="postureGauge" width="200" height="130"></canvas>
+            <div class="gauge-value">{{ overall_score }}%</div>
+        </div>
+    </div>
+
+    <!-- Passed / Failed stacked -->
+    <div class="stat-stack">
+        <div class="card stat-card">
+            <div class="card-header">
+                <span>Passed Checks</span>
+                <span class="info-icon" title="Total number of passed checks">&#9432;</span>
+            </div>
+            <div class="stat-value passed">{{ "{:,}".format(total_passed) }}</div>
+        </div>
+        <div class="card stat-card">
+            <div class="card-header">
+                <span>Failed Checks</span>
+                <span class="info-icon" title="Total number of failed checks">&#9432;</span>
+            </div>
+            <div class="stat-value failed">{{ "{:,}".format(total_failed) }}</div>
+        </div>
+    </div>
+
+    <!-- Top 5 Lowest Scoring -->
+    <div class="card chart-card wide-card">
+        <div class="card-header">
+            <span>Top 5 Lowest Scoring Compliance Frameworks</span>
+        </div>
+        <div class="chart-resizable-wrapper" style="position: relative; height: 160px;">
+            <canvas id="lowestChart"></canvas>
+            <div class="chart-y-resize-handle" id="chartYResizeHandle" title="Drag to resize labels"></div>
+        </div>
+    </div>
+</div>
+
+<!-- Framework Table -->
+<div class="table-section">
+    <div class="table-header-row">
+        <h2 class="section-title">Framework view</h2>
+        <div class="table-meta">
+            <span class="item-count">{{ frameworks|length }} Items</span>
+        </div>
+    </div>
+
+    <div class="table-controls">
+        <div class="search-box">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <input type="text" id="frameworkSearch" placeholder="Search frameworks..." />
+        </div>
+        <div class="filter-group">
+            <label>Provider</label>
+            <select id="filterProvider" class="filter-select">
+                <option value="">All</option>
+                {% set providers = frameworks|map(attribute='provider')|unique|sort %}
+                {% for p in providers %}
+                <option value="{{ p }}">{{ p|upper }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>Score</label>
+            <select id="filterScore" class="filter-select">
+                <option value="">All</option>
+                <option value="90-100">90% – 100% (High)</option>
+                <option value="70-89">70% – 89% (Medium)</option>
+                <option value="50-69">50% – 69% (Low)</option>
+                <option value="0-49">0% – 49% (Critical)</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label>Failed</label>
+            <select id="filterFailed" class="filter-select">
+                <option value="">All</option>
+                <option value="0">No failures</option>
+                <option value="1-10">1 – 10</option>
+                <option value="11-50">11 – 50</option>
+                <option value="51-200">51 – 200</option>
+                <option value="201+">201+</option>
+            </select>
+        </div>
+    </div>
+    <div class="active-filters" id="activeFilters"></div>
+
+    <table class="data-table" id="frameworkTable">
+        <thead>
+            <tr>
+                <th>Framework</th>
+                <th>Description</th>
+                <th>Total Checks</th>
+                <th>Passed Checks</th>
+                <th>Failed Checks</th>
+                <th>Posture Score</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for fw in frameworks %}
+            <tr class="clickable-row" data-href="/compliance/{{ fw.slug }}" data-provider="{{ fw.provider }}" data-score="{{ fw.score }}" data-failed="{{ fw.failed }}">
+                <td class="fw-name">
+                    {% if fw.logo_file %}
+                    <span class="fw-logo {{ fw.logo_bg }}">
+                        <img src="{{ url_for('static', filename='logos/' + fw.logo_file) }}" alt="">
+                    </span>
+                    {% else %}
+                    <span class="fw-badge" style="background: #7c3aed">{{ fw.provider[:3]|upper }}</span>
+                    {% endif %}
+                    {{ fw.name }}
+                </td>
+                <td class="fw-desc">{{ fw.description }}</td>
+                <td>{{ "{:,}".format(fw.total) }}</td>
+                <td>{{ "{:,}".format(fw.passed) }}</td>
+                <td>
+                    {% if fw.failed > 0 %}
+                    <span class="failed-link">{{ "{:,}".format(fw.failed) }}</span>
+                    {% else %}
+                    <span>0</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <div class="score-cell">
+                        <span class="score-pct">{{ fw.score }}%</span>
+                        <div class="score-bar">
+                            <div class="score-bar-fill {% if fw.score >= 90 %}score-green{% elif fw.score >= 70 %}score-yellow{% elif fw.score >= 50 %}score-orange{% elif fw.score >= 20 %}score-red{% else %}score-dark-red{% endif %}" style="width: {{ fw.score }}%"></div>
+                        </div>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Color helper for 5-tier score
+function scoreColor(s) {
+    if (s >= 90) return '#10b981';
+    if (s >= 70) return '#ca8a04';
+    if (s >= 50) return '#f97316';
+    if (s >= 20) return '#ef4444';
+    return '#991b1b';
+}
+
+// Posture gauge
+(function() {
+    const ctx = document.getElementById('postureGauge').getContext('2d');
+    const score = {{ overall_score }};
+    new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            datasets: [{
+                data: [score, 100 - score],
+                backgroundColor: [scoreColor(score), '#e2e8f0'],
+                borderWidth: 0,
+                circumference: 180,
+                rotation: 270,
+                cutout: '75%'
+            }]
+        },
+        options: {
+            responsive: false,
+            plugins: { legend: { display: false }, tooltip: { enabled: false } },
+            layout: { padding: 0 }
+        }
+    });
+})();
+
+// Top 5 lowest scoring bar chart — full names in tooltip, resizable y-axis labels
+var lowestChartInstance;
+var yAxisLabelWidth = null; // null = auto
+(function() {
+    const ctx = document.getElementById('lowestChart').getContext('2d');
+    const fullLabels = {{ lowest_5|map(attribute='name')|list|tojson }};
+    const scores = {{ lowest_5|map(attribute='score')|list|tojson }};
+
+    function truncateLabels(maxPx) {
+        // Estimate chars from pixel width (roughly 6.5px per char at size 11)
+        const maxChars = Math.max(8, Math.floor((maxPx || 180) / 6.5));
+        return fullLabels.map(l => l.length > maxChars ? l.substring(0, maxChars - 1) + '…' : l);
+    }
+
+    lowestChartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: truncateLabels(yAxisLabelWidth),
+            datasets: [{
+                label: 'Score %',
+                data: scores,
+                backgroundColor: scores.map(s => scoreColor(s)),
+                borderRadius: 4,
+                barThickness: 20
+            }]
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: { min: 0, max: 100, grid: { color: '#f1f5f9' }, ticks: { callback: v => v + '%' } },
+                y: {
+                    grid: { display: false },
+                    ticks: { font: { size: 11 } },
+                    afterFit: function(axis) {
+                        if (yAxisLabelWidth !== null) {
+                            axis.width = yAxisLabelWidth;
+                        }
+                    }
+                }
+            },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    callbacks: {
+                        title: function(items) { return fullLabels[items[0].dataIndex]; },
+                        label: function(item) { return 'Score: ' + item.raw + '%'; }
+                    }
+                }
+            }
+        }
+    });
+
+    // Position the resize handle at the y-axis right edge
+    function positionHandle() {
+        const handle = document.getElementById('chartYResizeHandle');
+        if (!handle || !lowestChartInstance) return;
+        const chartArea = lowestChartInstance.chartArea;
+        if (chartArea) {
+            handle.style.left = (chartArea.left - 3) + 'px';
+        }
+    }
+    // Re-position after first render
+    setTimeout(positionHandle, 100);
+
+    // Drag-to-resize y-axis labels
+    const handle = document.getElementById('chartYResizeHandle');
+    const wrapper = handle.parentElement;
+    let startX, startWidth;
+
+    handle.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        const chartArea = lowestChartInstance.chartArea;
+        startX = e.pageX;
+        startWidth = chartArea.left;
+        handle.classList.add('active');
+        wrapper.classList.add('chart-resizing');
+
+        function onMove(ev) {
+            const delta = ev.pageX - startX;
+            const newWidth = Math.max(60, Math.min(wrapper.offsetWidth - 80, startWidth + delta));
+            yAxisLabelWidth = newWidth;
+            // Update labels to fit new width
+            lowestChartInstance.data.labels = truncateLabels(newWidth);
+            lowestChartInstance.update('none');
+            positionHandle();
+        }
+        function onUp() {
+            handle.classList.remove('active');
+            wrapper.classList.remove('chart-resizing');
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+})();
+
+// Clickable rows
+document.querySelectorAll('.clickable-row').forEach(row => {
+    row.addEventListener('click', () => {
+        window.location.href = row.dataset.href;
+    });
+});
+
+// ===== Resizable Table Columns =====
+function makeResizable(table) {
+    const thead = table.querySelector('thead tr');
+    if (!thead) return;
+    const cols = thead.querySelectorAll('th');
+    // Set initial widths from computed
+    cols.forEach(th => {
+        th.style.width = th.offsetWidth + 'px';
+    });
+    table.style.tableLayout = 'fixed';
+
+    cols.forEach(th => {
+        const handle = document.createElement('div');
+        handle.className = 'resize-handle';
+        th.appendChild(handle);
+
+        let startX, startW;
+        handle.addEventListener('mousedown', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            startX = e.pageX;
+            startW = th.offsetWidth;
+            handle.classList.add('active');
+            table.classList.add('resizing');
+
+            function onMove(ev) {
+                const w = Math.max(40, startW + (ev.pageX - startX));
+                th.style.width = w + 'px';
+            }
+            function onUp() {
+                handle.classList.remove('active');
+                table.classList.remove('resizing');
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            }
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+    });
+}
+document.querySelectorAll('.data-table').forEach(makeResizable);
+
+// ===== Filtering =====
+function applyFilters() {
+    const searchQ = document.getElementById('frameworkSearch').value.toLowerCase();
+    const providerF = document.getElementById('filterProvider').value;
+    const scoreF = document.getElementById('filterScore').value;
+    const failedF = document.getElementById('filterFailed').value;
+    let visible = 0;
+
+    document.querySelectorAll('#frameworkTable tbody tr').forEach(row => {
+        const text = row.textContent.toLowerCase();
+        const provider = row.dataset.provider || '';
+        const score = parseFloat(row.dataset.score) || 0;
+        const failed = parseInt(row.dataset.failed) || 0;
+
+        let show = true;
+        if (searchQ && !text.includes(searchQ)) show = false;
+        if (providerF && provider !== providerF) show = false;
+        if (scoreF) {
+            const [lo, hi] = scoreF.split('-').map(Number);
+            if (score < lo || score > hi) show = false;
+        }
+        if (failedF) {
+            if (failedF === '0' && failed !== 0) show = false;
+            else if (failedF === '1-10' && (failed < 1 || failed > 10)) show = false;
+            else if (failedF === '11-50' && (failed < 11 || failed > 50)) show = false;
+            else if (failedF === '51-200' && (failed < 51 || failed > 200)) show = false;
+            else if (failedF === '201+' && failed < 201) show = false;
+        }
+
+        row.style.display = show ? '' : 'none';
+        if (show) visible++;
+    });
+
+    document.querySelector('.item-count').textContent = visible + ' Items';
+
+    const container = document.getElementById('activeFilters');
+    container.innerHTML = '';
+    if (providerF) addTag(container, 'Provider: ' + providerF.toUpperCase(), 'filterProvider');
+    if (scoreF) addTag(container, 'Score: ' + scoreF + '%', 'filterScore');
+    if (failedF) addTag(container, 'Failed: ' + failedF, 'filterFailed');
+}
+
+function addTag(container, label, filterId) {
+    const tag = document.createElement('span');
+    tag.className = 'filter-tag';
+    tag.innerHTML = label + ' <button onclick="clearFilter(\'' + filterId + '\')">&times;</button>';
+    container.appendChild(tag);
+}
+
+function clearFilter(filterId) {
+    document.getElementById(filterId).value = '';
+    applyFilters();
+}
+
+document.getElementById('frameworkSearch').addEventListener('input', applyFilters);
+document.getElementById('filterProvider').addEventListener('change', applyFilters);
+document.getElementById('filterScore').addEventListener('change', applyFilters);
+document.getElementById('filterFailed').addEventListener('change', applyFilters);
+</script>
+{% endblock %}

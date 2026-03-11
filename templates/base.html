@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Compliance Dashboard{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <nav class="sidebar" id="sidebar">
+        <div class="sidebar-brand">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span>Prowler</span>
+        </div>
+        <div class="sidebar-toggle" id="sidebarToggle" title="Toggle sidebar">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+        </div>
+        <ul class="sidebar-nav">
+            <li><a href="/" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                <span>Compliance</span>
+            </a></li>
+        </ul>
+        <div class="sidebar-bottom">
+            <button class="settings-btn" id="settingsBtn" title="Settings">
+                <img src="{{ url_for('static', filename='logos/setting.png') }}" alt="Settings">
+                <span>Settings</span>
+            </button>
+        </div>
+    </nav>
+
+    <!-- Settings Panel -->
+    <div class="settings-overlay" id="settingsOverlay"></div>
+    <div class="settings-panel" id="settingsPanel">
+        <div class="settings-panel-header">
+            <h2>AWS Configuration</h2>
+            <button class="settings-close" id="settingsClose">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+            </button>
+        </div>
+        <div class="settings-panel-body">
+            <div class="settings-section">
+                <label for="awsAccessKey">AWS Access Key ID</label>
+                <input type="text" id="awsAccessKey" placeholder="AKIAIOSFODNN7EXAMPLE" autocomplete="off">
+            </div>
+            <div class="settings-section">
+                <label for="awsSecretKey">AWS Secret Access Key</label>
+                <input type="password" id="awsSecretKey" placeholder="••••••••••••••••••••" autocomplete="off">
+                <span class="hint">Credentials are stored in browser only and sent to backend on scan trigger.</span>
+            </div>
+            <div class="settings-section">
+                <label for="awsRegion">AWS Region</label>
+                <select id="awsRegion" class="region-select">
+                    <option value="">Select a region…</option>
+                    <option value="us-east-1">US East (N. Virginia) — us-east-1</option>
+                    <option value="us-east-2">US East (Ohio) — us-east-2</option>
+                    <option value="us-west-1">US West (N. California) — us-west-1</option>
+                    <option value="us-west-2">US West (Oregon) — us-west-2</option>
+                    <option value="af-south-1">Africa (Cape Town) — af-south-1</option>
+                    <option value="ap-east-1">Asia Pacific (Hong Kong) — ap-east-1</option>
+                    <option value="ap-south-1">Asia Pacific (Mumbai) — ap-south-1</option>
+                    <option value="ap-southeast-1">Asia Pacific (Singapore) — ap-southeast-1</option>
+                    <option value="ap-southeast-2">Asia Pacific (Sydney) — ap-southeast-2</option>
+                    <option value="ap-northeast-1">Asia Pacific (Tokyo) — ap-northeast-1</option>
+                    <option value="ap-northeast-2">Asia Pacific (Seoul) — ap-northeast-2</option>
+                    <option value="ap-northeast-3">Asia Pacific (Osaka) — ap-northeast-3</option>
+                    <option value="ca-central-1">Canada (Central) — ca-central-1</option>
+                    <option value="eu-central-1">Europe (Frankfurt) — eu-central-1</option>
+                    <option value="eu-west-1">Europe (Ireland) — eu-west-1</option>
+                    <option value="eu-west-2">Europe (London) — eu-west-2</option>
+                    <option value="eu-west-3">Europe (Paris) — eu-west-3</option>
+                    <option value="eu-south-1">Europe (Milan) — eu-south-1</option>
+                    <option value="eu-north-1">Europe (Stockholm) — eu-north-1</option>
+                    <option value="me-south-1">Middle East (Bahrain) — me-south-1</option>
+                    <option value="sa-east-1">South America (São Paulo) — sa-east-1</option>
+                </select>
+            </div>
+            <div class="settings-section">
+                <label>Prowler Command</label>
+                <div style="background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; font-family: monospace; font-size: 13px; color: var(--text-muted);">
+                    prowler --provider aws
+                </div>
+                <span class="hint">This command will be executed on the backend when you trigger a scan.</span>
+            </div>
+        </div>
+        <div class="settings-actions">
+            <button class="btn-primary" id="triggerScan" disabled>Run Prowler Scan</button>
+            <button class="btn-secondary" id="settingsCancelBtn">Cancel</button>
+        </div>
+    </div>
+
+    <main class="content" id="mainContent">
+        {% block content %}{% endblock %}
+    </main>
+    {% block scripts %}{% endblock %}
+    <script>
+    // Sidebar toggle
+    (function() {
+        const sidebar = document.getElementById('sidebar');
+        const toggle = document.getElementById('sidebarToggle');
+        toggle.addEventListener('click', () => {
+            sidebar.classList.toggle('collapsed');
+            document.body.classList.toggle('sidebar-collapsed');
+        });
+    })();
+
+    // Settings panel
+    (function() {
+        const btn = document.getElementById('settingsBtn');
+        const overlay = document.getElementById('settingsOverlay');
+        const panel = document.getElementById('settingsPanel');
+        const closeBtn = document.getElementById('settingsClose');
+        const cancelBtn = document.getElementById('settingsCancelBtn');
+        const triggerBtn = document.getElementById('triggerScan');
+        const keyInput = document.getElementById('awsAccessKey');
+        const secretInput = document.getElementById('awsSecretKey');
+        const regionSelect = document.getElementById('awsRegion');
+
+        function openPanel() {
+            overlay.classList.add('open');
+            panel.classList.add('open');
+        }
+        function closePanel() {
+            overlay.classList.remove('open');
+            panel.classList.remove('open');
+        }
+        function checkReady() {
+            const ready = keyInput.value.trim() && secretInput.value.trim() && regionSelect.value;
+            triggerBtn.disabled = !ready;
+        }
+
+        btn.addEventListener('click', openPanel);
+        overlay.addEventListener('click', closePanel);
+        closeBtn.addEventListener('click', closePanel);
+        cancelBtn.addEventListener('click', closePanel);
+        keyInput.addEventListener('input', checkReady);
+        secretInput.addEventListener('input', checkReady);
+        regionSelect.addEventListener('change', checkReady);
+
+        triggerBtn.addEventListener('click', () => {
+            alert('Prowler scan trigger is not yet implemented. This will run:\n\nprowler --provider aws\n\nRegion: ' + regionSelect.value);
+        });
+    })();
+    </script>
+</body>
+</html>

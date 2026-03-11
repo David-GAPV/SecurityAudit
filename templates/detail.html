@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+{% block title %}{{ fw.name }} Compliance{% endblock %}
+
+{% block content %}
+<div class="detail-header">
+    <a href="/" class="back-link">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+        Back to Dashboard
+    </a>
+    <h1 class="page-title detail-title">
+        {% if fw.logo_file %}
+        <span class="fw-logo-lg {{ fw.logo_bg }}">
+            <img src="{{ url_for('static', filename='logos/' + fw.logo_file) }}" alt="">
+        </span>
+        {% else %}
+        <span class="fw-badge-lg" style="background:#7c3aed">{{ fw.provider[:3]|upper }}</span>
+        {% endif %}
+        {{ fw.name }}
+    </h1>
+</div>
+
+<!-- Overview Row -->
+<div class="detail-overview">
+    <!-- Compliance Donut -->
+    <div class="card detail-score-card">
+        <div class="donut-wrapper">
+            <canvas id="complianceDonut" width="220" height="220"></canvas>
+            <div class="donut-center">
+                <span class="donut-pct">{{ fw.score }}%</span>
+                <span class="donut-label">Compliance</span>
+            </div>
+        </div>
+        <div class="detail-stats">
+            <div class="detail-stat">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                <div>
+                    <div class="detail-stat-value">{{ fw.requirement_count }}</div>
+                    <div class="detail-stat-label">Requirements</div>
+                </div>
+            </div>
+            <div class="detail-stat">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                <div>
+                    <div class="detail-stat-value">{{ fw.sections|length }}</div>
+                    <div class="detail-stat-label">Sections</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Summary Stats -->
+    <div class="card detail-summary-card">
+        <div class="detail-summary-grid">
+            <div class="summary-item">
+                <div class="summary-label">Provider</div>
+                <div class="summary-value">{{ fw.provider|upper }}</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-label">Account ID</div>
+                <div class="summary-value">{{ fw.account_id }}</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-label">Total Checks</div>
+                <div class="summary-value">{{ "{:,}".format(fw.total) }}</div>
+            </div>
+            <div class="summary-item passed-bg">
+                <div class="summary-label">Passed</div>
+                <div class="summary-value text-green">{{ "{:,}".format(fw.passed) }}</div>
+            </div>
+            <div class="summary-item failed-bg">
+                <div class="summary-label">Failed</div>
+                <div class="summary-value text-red">{{ "{:,}".format(fw.failed) }}</div>
+            </div>
+        </div>
+        <!-- Score bar chart -->
+        <div class="score-breakdown-chart">
+            <canvas id="scoreBreakdown" height="60"></canvas>
+        </div>
+    </div>
+</div>
+
+<!-- Sections Table -->
+<div class="table-section">
+    <h2 class="section-title">Compliance Sections</h2>
+    <table class="data-table section-table">
+        <thead>
+            <tr>
+                <th style="width: 30px"></th>
+                <th>Section</th>
+                <th>Compliance Posture</th>
+                <th>Passed Checks</th>
+                <th>Failed Checks</th>
+                <th>Requirements</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for sec in fw.sections %}
+            <tr class="section-row" data-section-idx="{{ loop.index }}">
+                <td class="expand-icon">
+                    <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
+                </td>
+                <td class="sec-name">{{ sec.name }}</td>
+                <td>
+                    <div class="score-cell">
+                        <div class="score-bar detail-bar">
+                            <div class="score-bar-fill {% if sec.score >= 90 %}score-green{% elif sec.score >= 70 %}score-yellow{% elif sec.score >= 50 %}score-orange{% elif sec.score >= 20 %}score-red{% elif sec.score > 0 %}score-dark-red{% else %}gray{% endif %}" style="width: {{ sec.score }}%"></div>
+                        </div>
+                        <span class="score-pct">{{ sec.score }}%</span>
+                    </div>
+                </td>
+                <td class="text-green">{{ "{:,}".format(sec.passed) }}</td>
+                <td class="text-red">{{ "{:,}".format(sec.failed) }}</td>
+                <td>{{ sec.requirement_count }}</td>
+            </tr>
+            <!-- Expandable requirements -->
+            <tr class="requirements-row hidden" data-parent="{{ loop.index }}">
+                <td colspan="6">
+                    <div class="requirements-container">
+                        <table class="requirements-table">
+                            <thead>
+                                <tr>
+                                    <th>Requirement ID</th>
+                                    <th>Description</th>
+                                    <th>Passed</th>
+                                    <th>Failed</th>
+                                    <th>Score</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for req in sec.requirements %}
+                                <tr>
+                                    <td class="req-id">{{ req.id }}</td>
+                                    <td class="req-desc">{{ req.description }}</td>
+                                    <td class="text-green">{{ req.passed }}</td>
+                                    <td class="text-red">{{ req.failed }}</td>
+                                    <td>
+                                        <div class="score-cell">
+                                            <div class="score-bar mini-bar">
+                                                <div class="score-bar-fill {% if req.score >= 90 %}score-green{% elif req.score >= 70 %}score-yellow{% elif req.score >= 50 %}score-orange{% elif req.score >= 20 %}score-red{% elif req.score > 0 %}score-dark-red{% else %}gray{% endif %}" style="width: {{ req.score }}%"></div>
+                                            </div>
+                                            <span class="score-pct-sm">{{ req.score }}%</span>
+                                        </div>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Compliance donut
+(function() {
+    const ctx = document.getElementById('complianceDonut').getContext('2d');
+    const score = {{ fw.score }};
+    new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: ['Passed', 'Failed'],
+            datasets: [{
+                data: [{{ fw.passed }}, {{ fw.failed }}],
+                backgroundColor: ['#10b981', '#e2e8f0'],
+                borderWidth: 0,
+                cutout: '78%'
+            }]
+        },
+        options: {
+            responsive: false,
+            plugins: { legend: { display: false }, tooltip: { enabled: true } }
+        }
+    });
+})();
+
+// Score breakdown stacked bar
+(function() {
+    const ctx = document.getElementById('scoreBreakdown').getContext('2d');
+    new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: [''],
+            datasets: [
+                { label: 'Passed', data: [{{ fw.passed }}], backgroundColor: '#10b981', barThickness: 30, borderRadius: 4 },
+                { label: 'Failed', data: [{{ fw.failed }}], backgroundColor: '#ef4444', barThickness: 30, borderRadius: 4 }
+            ]
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                x: { stacked: true, grid: { display: false }, ticks: { display: false } },
+                y: { stacked: true, grid: { display: false }, ticks: { display: false } }
+            },
+            plugins: {
+                legend: { position: 'bottom', labels: { boxWidth: 12, padding: 16, font: { size: 11 } } }
+            }
+        }
+    });
+})();
+
+// Expandable section rows
+document.querySelectorAll('.section-row').forEach(row => {
+    row.addEventListener('click', () => {
+        const idx = row.dataset.sectionIdx;
+        const reqRow = document.querySelector(`.requirements-row[data-parent="${idx}"]`);
+        const chevron = row.querySelector('.chevron');
+        reqRow.classList.toggle('hidden');
+        chevron.classList.toggle('rotated');
+    });
+});
+</script>
+{% endblock %}
