@@ -2,7 +2,7 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-    --sidebar-w: 220px;
+    --sidebar-w: 260px;
     --bg: #f8fafc;
     --card-bg: #ffffff;
     --border: #e2e8f0;
@@ -58,24 +58,102 @@ body {
 
 .sidebar-brand {
     display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 0 20px 20px;
-    font-size: 20px;
-    font-weight: 700;
-    color: var(--purple);
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 16px 16px 16px;
     border-bottom: 1px solid var(--border);
-    white-space: nowrap;
     overflow: hidden;
 }
 
-.sidebar.collapsed .sidebar-brand span {
+.brand-logo {
+    height: 126px;
+    object-fit: contain;
+    flex-shrink: 0;
+    border-radius: 6px;
+    margin-left: -0.5cm;
+}
+
+.brand-logo-icon {
+    display: none;
+}
+
+.sidebar.collapsed .brand-logo-full {
+    display: none;
+}
+
+.sidebar.collapsed .brand-logo-icon {
+    display: block;
+}
+
+.brand-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.brand-name {
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--text);
+    line-height: 1.2;
+    letter-spacing: 1px;
+}
+
+.brand-title {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.3;
+    text-align: left;
+    white-space: nowrap;
+}
+
+.sidebar.collapsed .brand-text,
+.sidebar.collapsed .brand-title {
     display: none;
 }
 
 .sidebar.collapsed .sidebar-brand {
-    padding: 0 14px 20px;
-    justify-content: center;
+    padding: 14px 8px 16px;
+}
+
+/* Region checkbox group */
+.region-checkbox-group {
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 12px;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.region-cb {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text);
+    padding: 4px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    text-transform: none;
+    font-weight: 400;
+    letter-spacing: 0;
+}
+
+.region-cb:hover {
+    background: var(--purple-light);
+}
+
+.region-cb input[type="checkbox"] {
+    accent-color: var(--purple);
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
 }
 
 .sidebar-toggle {

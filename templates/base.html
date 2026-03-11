@@ -11,8 +11,9 @@
 <body>
     <nav class="sidebar" id="sidebar">
         <div class="sidebar-brand">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            <span>Prowler</span>
+            <img src="{{ url_for('static', filename='logos/gapv.webp') }}" alt="G-ASIAPACIFIC" class="brand-logo brand-logo-full">
+            <img src="{{ url_for('static', filename='logos/icon_gapv.webp') }}" alt="G-ASIAPACIFIC" class="brand-logo brand-logo-icon">
+            <span class="brand-title">Automated Cloud Guard</span>
         </div>
         <div class="sidebar-toggle" id="sidebarToggle" title="Toggle sidebar">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
@@ -51,38 +52,30 @@
                 <span class="hint">Credentials are stored in browser only and sent to backend on scan trigger.</span>
             </div>
             <div class="settings-section">
-                <label for="awsRegion">AWS Region</label>
-                <select id="awsRegion" class="region-select">
-                    <option value="">Select a region…</option>
-                    <option value="us-east-1">US East (N. Virginia) — us-east-1</option>
-                    <option value="us-east-2">US East (Ohio) — us-east-2</option>
-                    <option value="us-west-1">US West (N. California) — us-west-1</option>
-                    <option value="us-west-2">US West (Oregon) — us-west-2</option>
-                    <option value="af-south-1">Africa (Cape Town) — af-south-1</option>
-                    <option value="ap-east-1">Asia Pacific (Hong Kong) — ap-east-1</option>
-                    <option value="ap-south-1">Asia Pacific (Mumbai) — ap-south-1</option>
-                    <option value="ap-southeast-1">Asia Pacific (Singapore) — ap-southeast-1</option>
-                    <option value="ap-southeast-2">Asia Pacific (Sydney) — ap-southeast-2</option>
-                    <option value="ap-northeast-1">Asia Pacific (Tokyo) — ap-northeast-1</option>
-                    <option value="ap-northeast-2">Asia Pacific (Seoul) — ap-northeast-2</option>
-                    <option value="ap-northeast-3">Asia Pacific (Osaka) — ap-northeast-3</option>
-                    <option value="ca-central-1">Canada (Central) — ca-central-1</option>
-                    <option value="eu-central-1">Europe (Frankfurt) — eu-central-1</option>
-                    <option value="eu-west-1">Europe (Ireland) — eu-west-1</option>
-                    <option value="eu-west-2">Europe (London) — eu-west-2</option>
-                    <option value="eu-west-3">Europe (Paris) — eu-west-3</option>
-                    <option value="eu-south-1">Europe (Milan) — eu-south-1</option>
-                    <option value="eu-north-1">Europe (Stockholm) — eu-north-1</option>
-                    <option value="me-south-1">Middle East (Bahrain) — me-south-1</option>
-                    <option value="sa-east-1">South America (São Paulo) — sa-east-1</option>
-                </select>
-            </div>
-            <div class="settings-section">
-                <label>Prowler Command</label>
-                <div style="background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; font-family: monospace; font-size: 13px; color: var(--text-muted);">
-                    prowler --provider aws
+                <label>AWS Regions</label>
+                <div class="region-checkbox-group" id="regionCheckboxGroup">
+                    <label class="region-cb"><input type="checkbox" value="us-east-1"> US East (N. Virginia) — us-east-1</label>
+                    <label class="region-cb"><input type="checkbox" value="us-east-2"> US East (Ohio) — us-east-2</label>
+                    <label class="region-cb"><input type="checkbox" value="us-west-1"> US West (N. California) — us-west-1</label>
+                    <label class="region-cb"><input type="checkbox" value="us-west-2"> US West (Oregon) — us-west-2</label>
+                    <label class="region-cb"><input type="checkbox" value="af-south-1"> Africa (Cape Town) — af-south-1</label>
+                    <label class="region-cb"><input type="checkbox" value="ap-east-1"> Asia Pacific (Hong Kong) — ap-east-1</label>
+                    <label class="region-cb"><input type="checkbox" value="ap-south-1"> Asia Pacific (Mumbai) — ap-south-1</label>
+                    <label class="region-cb"><input type="checkbox" value="ap-southeast-1"> Asia Pacific (Singapore) — ap-southeast-1</label>
+                    <label class="region-cb"><input type="checkbox" value="ap-southeast-2"> Asia Pacific (Sydney) — ap-southeast-2</label>
+                    <label class="region-cb"><input type="checkbox" value="ap-northeast-1"> Asia Pacific (Tokyo) — ap-northeast-1</label>
+                    <label class="region-cb"><input type="checkbox" value="ap-northeast-2"> Asia Pacific (Seoul) — ap-northeast-2</label>
+                    <label class="region-cb"><input type="checkbox" value="ap-northeast-3"> Asia Pacific (Osaka) — ap-northeast-3</label>
+                    <label class="region-cb"><input type="checkbox" value="ca-central-1"> Canada (Central) — ca-central-1</label>
+                    <label class="region-cb"><input type="checkbox" value="eu-central-1"> Europe (Frankfurt) — eu-central-1</label>
+                    <label class="region-cb"><input type="checkbox" value="eu-west-1"> Europe (Ireland) — eu-west-1</label>
+                    <label class="region-cb"><input type="checkbox" value="eu-west-2"> Europe (London) — eu-west-2</label>
+                    <label class="region-cb"><input type="checkbox" value="eu-west-3"> Europe (Paris) — eu-west-3</label>
+                    <label class="region-cb"><input type="checkbox" value="eu-south-1"> Europe (Milan) — eu-south-1</label>
+                    <label class="region-cb"><input type="checkbox" value="eu-north-1"> Europe (Stockholm) — eu-north-1</label>
+                    <label class="region-cb"><input type="checkbox" value="me-south-1"> Middle East (Bahrain) — me-south-1</label>
+                    <label class="region-cb"><input type="checkbox" value="sa-east-1"> South America (São Paulo) — sa-east-1</label>
                 </div>
-                <span class="hint">This command will be executed on the backend when you trigger a scan.</span>
             </div>
         </div>
         <div class="settings-actions">
@@ -116,7 +109,7 @@
         const triggerBtn = document.getElementById('triggerScan');
         const keyInput = document.getElementById('awsAccessKey');
         const secretInput = document.getElementById('awsSecretKey');
-        const regionSelect = document.getElementById('awsRegion');
+        const regionBoxes = document.querySelectorAll('#regionCheckboxGroup input[type="checkbox"]');
 
         function openPanel() {
             overlay.classList.add('open');
@@ -126,8 +119,11 @@
             overlay.classList.remove('open');
             panel.classList.remove('open');
         }
+        function getSelectedRegions() {
+            return Array.from(regionBoxes).filter(cb => cb.checked).map(cb => cb.value);
+        }
         function checkReady() {
-            const ready = keyInput.value.trim() && secretInput.value.trim() && regionSelect.value;
+            const ready = keyInput.value.trim() && secretInput.value.trim() && getSelectedRegions().length > 0;
             triggerBtn.disabled = !ready;
         }
 
@@ -137,10 +133,11 @@
         cancelBtn.addEventListener('click', closePanel);
         keyInput.addEventListener('input', checkReady);
         secretInput.addEventListener('input', checkReady);
-        regionSelect.addEventListener('change', checkReady);
+        regionBoxes.forEach(cb => cb.addEventListener('change', checkReady));
 
         triggerBtn.addEventListener('click', () => {
-            alert('Prowler scan trigger is not yet implemented. This will run:\n\nprowler --provider aws\n\nRegion: ' + regionSelect.value);
+            const regions = getSelectedRegions();
+            alert('Prowler scan trigger is not yet implemented.\n\nSelected regions: ' + regions.join(', '));
         });
     })();
     </script>
