@@ -1,4 +1,5 @@
 import csv
+import json
 import os
 import glob
 from collections import defaultdict
@@ -9,6 +10,18 @@ app = Flask(__name__)
 COMPLIANCE_DIR = os.path.join(
     os.path.dirname(__file__), "..", "prowler", "output", "compliance"
 )
+
+PROWLER_OUTPUT_DIR = os.path.join(
+    os.path.dirname(__file__), "..", "prowler", "output"
+)
+
+# Load service name display mapping
+SERVICE_NAME_MAP = {}
+_svc_map_path = os.path.join(os.path.dirname(__file__), "service_names.csv")
+if os.path.exists(_svc_map_path):
+    with open(_svc_map_path, encoding="utf-8") as _f:
+        for _row in csv.DictReader(_f):
+            SERVICE_NAME_MAP[_row["raw"].strip()] = _row["display"].strip()
 
 # Map slug keywords to logo files and their background style
 # Each entry: (logo_filename, bg_css_class)
@@ -127,7 +140,7 @@ def parse_framework_detail(filepath):
             sections[section]["requirements"].add(req_id)
 
     # Build requirement-level detail
-    requirements = defaultdict(lambda: {"total": 0, "passed": 0, "description": "", "section": "", "status_extended": []})
+    requirements = defaultdict(lambda: {"total": 0, "passed": 0, "description": "", "section": "", "check_ids": set(), "resources": []})
     for r in rows:
         req_id = r.get("REQUIREMENTS_ID", "").strip()
         if not req_id:
@@ -135,8 +148,25 @@ def parse_framework_detail(filepath):
         requirements[req_id]["total"] += 1
         requirements[req_id]["description"] = r.get("REQUIREMENTS_DESCRIPTION", "").strip()
         requirements[req_id]["section"] = r.get("REQUIREMENTS_ATTRIBUTES_SECTION", "").strip()
+        check_id = r.get("CHECKID", "").strip()
+        if check_id:
+            requirements[req_id]["check_ids"].add(check_id)
+        # Collect resource-level data
+        resource_id = r.get("RESOURCEID", "").strip()
+        if resource_id:
+            requirements[req_id]["resources"].append({
+                "resource_id": resource_id,
+                "resource_name": r.get("RESOURCENAME", "").strip(),
+                "status": r.get("STATUS", "").strip().upper(),
+                "status_extended": r.get("STATUSEXTENDED", "").strip(),
+                "region": r.get("REGION", "").strip(),
+                "check_id": check_id,
+            })
         if r.get("STATUS", "").upper() == "PASS":
             requirements[req_id]["passed"] += 1
+
+    # Enrich with main prowler CSV data
+    main_lookup = _parse_main_prowler_csv()
 
     section_list = []
     for sec_name in sorted(sections.keys()):
@@ -147,6 +177,19 @@ def parse_framework_detail(filepath):
         for req_id, req_data in sorted(requirements.items()):
             if req_data["section"] == sec_name or (sec_name == "Uncategorized" and not req_data["section"]):
                 req_score = round((req_data["passed"] / req_data["total"]) * 100, 2) if req_data["total"] else 0
+                # Enrich from main CSV using the first matching check_id
+                enrichment = {}
+                for cid in req_data["check_ids"]:
+                    if cid in main_lookup:
+                        enrichment = main_lookup[cid]
+                        break
+                severity_raw = enrichment.get("severity", "")
+                severity = severity_raw.capitalize() if severity_raw else ""
+                # For requirements with only manual checks, show Manual badge
+                if not severity and req_data["check_ids"] and all(c == "manual" for c in req_data["check_ids"]):
+                    severity = "Manual"
+                svc_raw = enrichment.get("service_name", "")
+                service_display = SERVICE_NAME_MAP.get(svc_raw, svc_raw.replace("_", " ").title() if svc_raw else "")
                 sec_reqs.append({
                     "id": req_id,
                     "description": req_data["description"],
@@ -154,6 +197,17 @@ def parse_framework_detail(filepath):
                     "passed": req_data["passed"],
                     "failed": req_data["total"] - req_data["passed"],
                     "score": req_score,
+                    "check_id": enrichment.get("check_id", ""),
+                    "check_title": enrichment.get("check_title", ""),
+                    "severity": severity,
+                    "service_name": service_display,
+                    "status_extended": enrichment.get("status_extended", ""),
+                    "risk": enrichment.get("risk", ""),
+                    "remediation_text": enrichment.get("remediation_text", ""),
+                    "remediation_url": enrichment.get("remediation_url", ""),
+                    "additional_urls": enrichment.get("additional_urls", ""),
+                    "resources": req_data["resources"],
+                    "resources_lookup": {cid: SERVICE_NAME_MAP.get(main_lookup[cid]["service_name"], main_lookup[cid]["service_name"].replace("_", " ").title()) for cid in req_data["check_ids"] if cid in main_lookup},
                 })
         section_list.append({
             "name": sec_name,
@@ -187,6 +241,35 @@ def _read_csv(filepath):
         for row in reader:
             rows.append(row)
     return rows
+
+
+def _parse_main_prowler_csv():
+    """Parse the main prowler output CSV and build a lookup by CHECK_ID."""
+    csv_files = sorted(glob.glob(os.path.join(PROWLER_OUTPUT_DIR, "prowler-output-*.csv")))
+    # Exclude files in subdirectories (compliance/)
+    csv_files = [f for f in csv_files if os.path.abspath(os.path.dirname(f)) == os.path.abspath(PROWLER_OUTPUT_DIR)]
+    if not csv_files:
+        return {}
+    # Use the first (or only) main output file
+    rows = _read_csv(csv_files[0])
+    lookup = {}
+    for r in rows:
+        check_id = r.get("CHECK_ID", "").strip()
+        if not check_id:
+            continue
+        if check_id not in lookup:
+            lookup[check_id] = {
+                "check_id": check_id,
+                "check_title": r.get("CHECK_TITLE", "").strip(),
+                "severity": r.get("SEVERITY", "").strip(),
+                "service_name": r.get("SERVICE_NAME", "").strip(),
+                "status_extended": r.get("STATUS_EXTENDED", "").strip(),
+                "risk": r.get("RISK", "").strip(),
+                "remediation_text": r.get("REMEDIATION_RECOMMENDATION_TEXT", "").strip(),
+                "remediation_url": r.get("REMEDIATION_RECOMMENDATION_URL", "").strip(),
+                "additional_urls": r.get("ADDITIONAL_URLS", "").strip(),
+            }
+    return lookup
 
 
 @app.route("/")

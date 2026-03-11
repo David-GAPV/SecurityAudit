@@ -1,0 +1,33 @@
+raw,display
+accessanalyzer,IAM Access Analyzer
+account,Account
+apigatewayv2,API Gateway V2
+awslambda,Lambda
+backup,Backup
+bedrock,Bedrock
+cloudformation,CloudFormation
+cloudtrail,CloudTrail
+cloudwatch,CloudWatch
+config,Config
+drs,DRS
+dynamodb,DynamoDB
+ec2,EC2
+elbv2,ELB V2
+emr,EMR
+eventbridge,EventBridge
+guardduty,GuardDuty
+iam,IAM
+inspector2,Inspector
+kms,KMS
+macie,Macie
+networkfirewall,Network Firewall
+organizations,Organizations
+rds,RDS
+resourceexplorer2,Resource Explorer
+s3,S3
+securityhub,Security Hub
+ssmincidents,SSM Incidents
+stepfunctions,Step Functions
+trustedadvisor,Trusted Advisor
+vpc,VPC
+wellarchitected,Well-Architected

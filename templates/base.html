@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Compliance Dashboard{% endblock %}</title>
+    <title>{% block title %}G-Cloud Guard{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     {% block head %}{% endblock %}
@@ -11,9 +11,11 @@
 <body>
     <nav class="sidebar" id="sidebar">
         <div class="sidebar-brand">
-            <img src="{{ url_for('static', filename='logos/gapv.webp') }}" alt="G-ASIAPACIFIC" class="brand-logo brand-logo-full">
-            <img src="{{ url_for('static', filename='logos/icon_gapv.webp') }}" alt="G-ASIAPACIFIC" class="brand-logo brand-logo-icon">
-            <span class="brand-title">Automated Cloud Guard</span>
+            <a href="/" class="sidebar-brand-link">
+                <img src="{{ url_for('static', filename='logos/gapv.webp') }}" alt="G-ASIAPACIFIC" class="brand-logo brand-logo-full">
+                <img src="{{ url_for('static', filename='logos/icon_gapv.webp') }}" alt="G-ASIAPACIFIC" class="brand-logo brand-logo-icon">
+                <span class="brand-title">Cloud Guard</span>
+            </a>
         </div>
         <div class="sidebar-toggle" id="sidebarToggle" title="Toggle sidebar">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
@@ -89,14 +91,17 @@
     </main>
     {% block scripts %}{% endblock %}
     <script>
-    // Sidebar toggle
+    // Sidebar toggle — click any empty area of sidebar
     (function() {
         const sidebar = document.getElementById('sidebar');
-        const toggle = document.getElementById('sidebarToggle');
-        toggle.addEventListener('click', () => {
+        sidebar.addEventListener('click', (e) => {
+            // Don't toggle if clicking on interactive elements (links, buttons, inputs)
+            const target = e.target.closest('a, button, input, select, label, .settings-btn');
+            if (target) return;
             sidebar.classList.toggle('collapsed');
             document.body.classList.toggle('sidebar-collapsed');
         });
+        sidebar.style.cursor = 'pointer';
     })();
 
     // Settings panel

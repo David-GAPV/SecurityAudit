@@ -116,23 +116,38 @@
             <tr class="requirements-row hidden" data-parent="{{ loop.index }}">
                 <td colspan="6">
                     <div class="requirements-container">
-                        <table class="requirements-table">
+                        <table class="requirements-table resizable-req-table">
                             <thead>
                                 <tr>
-                                    <th>Requirement ID</th>
-                                    <th>Description</th>
-                                    <th>Passed</th>
-                                    <th>Failed</th>
-                                    <th>Score</th>
+                                    <th style="width:50%">Title</th>
+                                    <th style="width:8%">Severity</th>
+                                    <th style="width:12%">Service Name</th>
+                                    <th style="width:8%">Passed</th>
+                                    <th style="width:8%">Failed</th>
+                                    <th style="width:14%">Score</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {% for req in sec.requirements %}
-                                <tr>
-                                    <td class="req-id">{{ req.id }}</td>
-                                    <td class="req-desc">{{ req.description }}</td>
-                                    <td class="text-green">{{ req.passed }}</td>
-                                    <td class="text-red">{{ req.failed }}</td>
+                                <tr class="req-clickable-row"
+                                    data-req-id="{{ req.id }}"
+                                    data-req-title="{{ req.check_title or req.description }}"
+                                    data-req-severity="{{ req.severity }}"
+                                    data-req-status-ext="{{ req.status_extended }}"
+                                    data-req-remediation="{{ req.remediation_text }}"
+                                    data-req-risk="{{ req.risk }}"
+                                    data-req-urls="{{ req.additional_urls }}"
+                                    data-req-resources='{{ req.resources | tojson }}'
+                                    data-req-res-lookup='{{ req.resources_lookup | tojson }}'>
+                                    <td class="req-title-cell">{{ req.check_title or req.description or req.id }}</td>
+                                    <td>
+                                        {% if req.severity %}
+                                        <span class="severity-badge severity-{{ req.severity|lower }}">{{ req.severity }}</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="req-service">{{ req.service_name }}</td>
+                                    <td class="text-green req-count-lg">{{ req.passed }}</td>
+                                    <td class="text-red req-count-lg">{{ req.failed }}</td>
                                     <td>
                                         <div class="score-cell">
                                             <div class="score-bar mini-bar">
@@ -151,6 +166,43 @@
             {% endfor %}
         </tbody>
     </table>
+</div>
+<!-- Requirement Detail Panel -->
+<div class="req-panel-overlay" id="reqPanelOverlay"></div>
+<div class="req-detail-panel" id="reqDetailPanel">
+    <div class="req-panel-drag-handle" id="reqPanelDragHandle"></div>
+    <div class="req-panel-header">
+        <div class="req-panel-title-row">
+            <span class="req-panel-id-bracket">[<span id="reqPanelId"></span>]</span>
+            <span class="req-panel-title" id="reqPanelTitle"></span>
+            <span class="severity-badge" id="reqPanelSeverity"></span>
+        </div>
+        <button class="req-panel-close" id="reqPanelClose">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+    </div>
+    <div class="req-panel-body">
+        <div class="req-panel-section">
+            <h4>Description</h4>
+            <div id="reqPanelDesc"></div>
+        </div>
+        <div class="req-panel-section" id="reqPanelResourcesSection" style="display:none">
+            <h4>Resources</h4>
+            <div id="reqPanelResources" class="req-panel-resources"></div>
+        </div>
+        <div class="req-panel-section">
+            <h4>Recommendation</h4>
+            <div id="reqPanelRemediation"></div>
+        </div>
+        <div class="req-panel-section">
+            <h4>Exposure Risk</h4>
+            <div id="reqPanelRisk"></div>
+        </div>
+        <div class="req-panel-section" id="reqPanelUrlsSection" style="display:none">
+            <h4>Additional References</h4>
+            <div id="reqPanelUrls"></div>
+        </div>
+    </div>
 </div>
 {% endblock %}
 
@@ -215,5 +267,176 @@ document.querySelectorAll('.section-row').forEach(row => {
         chevron.classList.toggle('rotated');
     });
 });
+
+// ===== Resizable Requirements Table Columns =====
+function makeReqTableResizable(table) {
+    const thead = table.querySelector('thead tr');
+    if (!thead) return;
+    const cols = thead.querySelectorAll('th');
+    cols.forEach(th => { th.style.width = th.offsetWidth + 'px'; });
+    table.style.tableLayout = 'fixed';
+
+    cols.forEach(th => {
+        const handle = document.createElement('div');
+        handle.className = 'resize-handle';
+        th.style.position = 'relative';
+        th.appendChild(handle);
+
+        let startX, startW;
+        handle.addEventListener('mousedown', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            startX = e.pageX;
+            startW = th.offsetWidth;
+            handle.classList.add('active');
+            table.classList.add('resizing');
+
+            function onMove(ev) {
+                const w = Math.max(40, startW + (ev.pageX - startX));
+                th.style.width = w + 'px';
+            }
+            function onUp() {
+                handle.classList.remove('active');
+                table.classList.remove('resizing');
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            }
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+    });
+}
+
+// Observe for newly expanded requirement tables and make them resizable
+const observer = new MutationObserver(() => {
+    document.querySelectorAll('.resizable-req-table').forEach(table => {
+        if (!table.dataset.resizable) {
+            table.dataset.resizable = '1';
+            requestAnimationFrame(() => makeReqTableResizable(table));
+        }
+    });
+});
+observer.observe(document.querySelector('.table-section'), { subtree: true, attributes: true, attributeFilter: ['class'] });
+
+// ===== Requirement Detail Panel =====
+(function() {
+    const overlay = document.getElementById('reqPanelOverlay');
+    const panel = document.getElementById('reqDetailPanel');
+    const closeBtn = document.getElementById('reqPanelClose');
+    const dragHandle = document.getElementById('reqPanelDragHandle');
+
+    // Simple markdown-to-HTML: **bold**, `code`, newlines
+    function md(text) {
+        if (!text) return '';
+        let h = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+        h = h.replace(/\n/g, '<br>');
+        return h;
+    }
+
+    function openPanel(row) {
+        const reqId = row.dataset.reqId || '';
+        const title = row.dataset.reqTitle || '';
+        const severity = row.dataset.reqSeverity || '';
+        const statusExt = row.dataset.reqStatusExt || '';
+        const remediation = row.dataset.reqRemediation || '';
+        const risk = row.dataset.reqRisk || '';
+        const urls = row.dataset.reqUrls || '';
+        let resources = [];
+        let resLookup = {};
+        try { resources = JSON.parse(row.dataset.reqResources || '[]'); } catch(e) {}
+        try { resLookup = JSON.parse(row.dataset.reqResLookup || '{}'); } catch(e) {}
+
+        document.getElementById('reqPanelId').textContent = reqId;
+        document.getElementById('reqPanelTitle').textContent = title;
+
+        const sevBadge = document.getElementById('reqPanelSeverity');
+        sevBadge.textContent = severity;
+        sevBadge.className = 'severity-badge' + (severity ? ' severity-' + severity.toLowerCase() : '');
+        sevBadge.style.display = severity ? '' : 'none';
+
+        document.getElementById('reqPanelDesc').innerHTML = md(statusExt) || 'No description available.';
+        document.getElementById('reqPanelRemediation').innerHTML = md(remediation) || 'No recommendation available.';
+        document.getElementById('reqPanelRisk').innerHTML = md(risk) || 'No risk information available.';
+
+        // Resources list
+        const resSection = document.getElementById('reqPanelResourcesSection');
+        const resContainer = document.getElementById('reqPanelResources');
+        if (resources.length > 0) {
+            resSection.style.display = '';
+            resContainer.innerHTML = '<table class="req-resources-table"><thead><tr><th>Resource</th><th>Region</th><th>Service</th><th>Status</th></tr></thead><tbody>' +
+                resources.map(r => {
+                    const name = r.resource_name || r.resource_id;
+                    const cls = r.status === 'PASS' ? 'res-pass' : 'res-fail';
+                    const label = r.status === 'PASS' ? 'Pass' : 'Fail';
+                    const region = (r.region || '').replace(/</g,'&lt;');
+                    const svc = (resLookup[r.check_id] || '').replace(/</g,'&lt;');
+
+                    return '<tr><td class="res-name" title="' + (r.resource_id || '').replace(/"/g,'&quot;') + '">' +
+                        (name || '').replace(/</g,'&lt;') +
+                        '</td><td class=\"res-region\">' + region + '</td><td class=\"res-service\">' + svc + '</td><td><span class=\"res-status ' + cls + '\">' + label + '</span></td></tr>';
+                }).join('') + '</tbody></table>';
+        } else {
+            resSection.style.display = 'none';
+        }
+
+        const urlsSection = document.getElementById('reqPanelUrlsSection');
+        const urlsContainer = document.getElementById('reqPanelUrls');
+        if (urls && urls.trim()) {
+            urlsSection.style.display = '';
+            const urlList = urls.split('|').map(u => u.trim()).filter(u => u);
+            urlsContainer.innerHTML = urlList.map(u =>
+                '<a href="' + u.replace(/"/g, '&quot;') + '" target="_blank" rel="noopener noreferrer">' +
+                u.replace(/</g, '&lt;') + '</a>'
+            ).join('<br>');
+        } else {
+            urlsSection.style.display = 'none';
+        }
+
+        overlay.classList.add('open');
+        panel.classList.add('open');
+    }
+
+    function closePanel() {
+        overlay.classList.remove('open');
+        panel.classList.remove('open');
+    }
+
+    overlay.addEventListener('click', closePanel);
+    closeBtn.addEventListener('click', closePanel);
+
+    document.addEventListener('click', (e) => {
+        const row = e.target.closest('.req-clickable-row');
+        if (row) {
+            e.stopPropagation();
+            openPanel(row);
+        }
+    });
+
+    // ===== Drag-to-resize panel =====
+    let dragStartX, dragStartW;
+    dragHandle.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        dragStartX = e.clientX;
+        dragStartW = panel.offsetWidth;
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+
+        function onMove(ev) {
+            const delta = dragStartX - ev.clientX;
+            const newW = Math.max(350, Math.min(window.innerWidth - 40, dragStartW + delta));
+            panel.style.width = newW + 'px';
+        }
+        function onUp() {
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+})();
 </script>
 {% endblock %}
