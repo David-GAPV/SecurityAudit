@@ -2,7 +2,23 @@
 {% block title %}G-Cloud Guard{% endblock %}
 
 {% block content %}
-<h1 class="page-title">Compliance</h1>
+<div class="page-title-row">
+    <h1 class="page-title">Compliance</h1>
+    <div class="page-actions">
+        <button class="io-btn" id="importBtn" title="Import a prowler output ZIP">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Import
+        </button>
+        <a class="io-btn" href="/export" download>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export
+        </a>
+    </div>
+</div>
+<!-- Hidden file picker for import -->
+<input type="file" id="importFileInput" accept=".zip" style="display:none">
+<!-- Import toast notification -->
+<div id="importToast" class="import-toast" style="display:none"></div>
 
 <!-- Top Stats Row -->
 <div class="stats-row">
@@ -387,5 +403,54 @@ document.getElementById('frameworkSearch').addEventListener('input', applyFilter
 document.getElementById('filterProvider').addEventListener('change', applyFilters);
 document.getElementById('filterScore').addEventListener('change', applyFilters);
 document.getElementById('filterFailed').addEventListener('change', applyFilters);
+
+// ── Import / Export ──────────────────────────────────────────────
+const importBtn = document.getElementById('importBtn');
+const importFileInput = document.getElementById('importFileInput');
+const importToast = document.getElementById('importToast');
+
+function showToast(msg, isError) {
+    importToast.textContent = msg;
+    importToast.className = 'import-toast ' + (isError ? 'toast-error' : 'toast-success');
+    importToast.style.display = 'block';
+    clearTimeout(importToast._timer);
+    importToast._timer = setTimeout(() => { importToast.style.display = 'none'; }, 5000);
+}
+
+importBtn.addEventListener('click', () => importFileInput.click());
+
+importFileInput.addEventListener('change', async () => {
+    const file = importFileInput.files[0];
+    if (!file) return;
+    importFileInput.value = '';
+
+    importBtn.disabled = true;
+    importBtn.textContent = 'Importing…';
+
+    const form = new FormData();
+    form.append('file', file);
+
+    try {
+        const res = await fetch('/import', { method: 'POST', body: form });
+        // Guard against non-JSON responses (e.g. HTML 404/500 from server restart)
+        const ct = res.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) {
+            showToast('Import failed: server returned an unexpected response (HTTP ' + res.status + '). Try again.', true);
+            return;
+        }
+        const json = await res.json();
+        if (json.success) {
+            showToast('Import successful (' + json.extracted + ' files). Reloading…', false);
+            setTimeout(() => location.reload(), 1800);
+        } else {
+            showToast('Import failed: ' + (json.error || 'Unknown error'), true);
+        }
+    } catch (e) {
+        showToast('Import failed: ' + e.message, true);
+    } finally {
+        importBtn.disabled = false;
+        importBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> Import';
+    }
+});
 </script>
 {% endblock %}

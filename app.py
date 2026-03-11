@@ -1,11 +1,21 @@
 import csv
+import glob
+import io
 import json
 import os
-import glob
+import re
+import shutil
+import zipfile
 from collections import defaultdict
-from flask import Flask, render_template, abort
+from flask import Flask, abort, jsonify, render_template, request, send_file
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB upload limit
+
+
+@app.errorhandler(413)
+def request_too_large(e):
+    return jsonify({"error": "File too large. Maximum upload size is 500 MB."}), 413
 
 COMPLIANCE_DIR = os.path.join(
     os.path.dirname(__file__), "..", "prowler", "output", "compliance"
@@ -308,6 +318,131 @@ def compliance_detail(slug):
     detail["logo_file"] = fw.get("logo_file")
     detail["logo_bg"] = fw.get("logo_bg")
     return render_template("detail.html", fw=detail)
+
+
+@app.route("/export")
+def export_data():
+    """Package the prowler output directory into a ZIP for download."""
+    output_dir = os.path.abspath(PROWLER_OUTPUT_DIR)
+    compliance_dir = os.path.abspath(COMPLIANCE_DIR)
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Main output files (csv, html, ocsf.json) in the root of the ZIP
+        for f in sorted(glob.glob(os.path.join(output_dir, "prowler-output-*"))):
+            if os.path.isfile(f) and os.path.abspath(os.path.dirname(f)) == output_dir:
+                zf.write(f, os.path.basename(f))
+        # Compliance CSVs under compliance/ subfolder
+        for f in sorted(glob.glob(os.path.join(compliance_dir, "*.csv"))):
+            if os.path.isfile(f):
+                zf.write(f, os.path.join("compliance", os.path.basename(f)))
+
+    mem.seek(0)
+    return send_file(
+        mem,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="prowler-output-export.zip",
+    )
+
+
+@app.route("/import", methods=["POST"])
+def import_data():
+    """Accept a ZIP upload matching the prowler output structure."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    uploaded = request.files["file"]
+    if not uploaded.filename.lower().endswith(".zip"):
+        return jsonify({"error": "File must be a .zip archive"}), 400
+
+    try:
+        data = uploaded.read()
+    except Exception as e:
+        return jsonify({"error": "Failed to read uploaded file: " + str(e)}), 400
+
+    try:
+        zf_obj = zipfile.ZipFile(io.BytesIO(data), "r")
+    except zipfile.BadZipFile:
+        return jsonify({"error": "Invalid or corrupted ZIP file"}), 400
+    except Exception as e:
+        return jsonify({"error": "Failed to open ZIP: " + str(e)}), 400
+
+    try:
+        with zf_obj as zf:
+            raw_names = zf.namelist()
+
+            # Detect and strip a single common folder prefix (e.g. "output/" or "prowler-output-xxx/")
+            # so users can zip the folder itself and still have it work.
+            prefix = ""
+            top_level = {n.split("/")[0] for n in raw_names if n}
+            if len(top_level) == 1:
+                candidate = list(top_level)[0] + "/"
+                # Only treat it as a prefix if there are no prowler-output CSVs at the true root
+                root_at_true = [n for n in raw_names if re.match(r"^prowler-output-[^/]+\.csv$", n)]
+                if not root_at_true:
+                    prefix = candidate
+
+            def strip(name):
+                return name[len(prefix):] if prefix and name.startswith(prefix) else name
+
+            names = [strip(n) for n in raw_names]
+
+            # Validate structure
+            root_csvs = [n for n in names if re.match(r"^prowler-output-[^/]+\.csv$", n)]
+            compliance_csvs = [n for n in names if re.match(r"^compliance/prowler-output-[^/]+\.csv$", n)]
+
+            if not root_csvs:
+                return jsonify({"error": (
+                    "ZIP must contain a prowler-output-*.csv in the root. "
+                    "Export using the Export button on this page to get the correct format."
+                )}), 400
+            if not compliance_csvs:
+                return jsonify({"error": (
+                    "ZIP must contain compliance/prowler-output-*.csv files. "
+                    "Export using the Export button on this page to get the correct format."
+                )}), 400
+
+            output_dir = os.path.abspath(PROWLER_OUTPUT_DIR)
+            compliance_dir = os.path.abspath(COMPLIANCE_DIR)
+
+            # Remove existing main and compliance output files (skip ZIP files themselves)
+            for old in glob.glob(os.path.join(output_dir, "prowler-output-*")):
+                if (os.path.isfile(old)
+                        and os.path.abspath(os.path.dirname(old)) == output_dir
+                        and not old.lower().endswith(".zip")):
+                    os.remove(old)
+            for old in glob.glob(os.path.join(compliance_dir, "*.csv")):
+                if os.path.isfile(old):
+                    os.remove(old)
+
+            os.makedirs(compliance_dir, exist_ok=True)
+
+            # Extract with path-traversal protection
+            allowed_root = re.compile(r"^prowler-output-[^/]+\.(csv|html|json)$")
+            allowed_compliance = re.compile(r"^compliance/prowler-output-[^/]+\.csv$")
+
+            extracted = 0
+            for raw_name, norm_name in zip(raw_names, names):
+                if allowed_root.match(norm_name):
+                    target = os.path.normpath(os.path.join(output_dir, os.path.basename(norm_name)))
+                    if not target.startswith(output_dir + os.sep):
+                        continue
+                elif allowed_compliance.match(norm_name):
+                    target = os.path.normpath(os.path.join(compliance_dir, os.path.basename(norm_name)))
+                    if not target.startswith(compliance_dir + os.sep):
+                        continue
+                else:
+                    continue
+
+                with zf.open(raw_name) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+                extracted += 1
+
+    except Exception as e:
+        return jsonify({"error": "Import failed: " + str(e)}), 500
+
+    return jsonify({"success": True, "extracted": extracted})
 
 
 if __name__ == "__main__":

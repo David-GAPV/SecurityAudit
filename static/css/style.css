@@ -422,11 +422,76 @@ body.sidebar-collapsed .content {
     margin-left: 56px;
 }
 
+.page-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+}
+
 .page-title {
     font-size: 24px;
     font-weight: 700;
-    margin-bottom: 20px;
+    margin-bottom: 0;
     color: var(--text);
+}
+
+.page-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.io-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 16px;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--text);
+    text-decoration: none;
+    transition: background .15s, border-color .15s;
+    white-space: nowrap;
+}
+
+.io-btn:hover:not(:disabled) {
+    background: var(--bg);
+    border-color: var(--purple);
+    color: var(--purple);
+}
+
+.io-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+/* Import toast */
+.import-toast {
+    position: fixed;
+    top: 20px;
+    right: 24px;
+    z-index: 9999;
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    box-shadow: 0 4px 16px rgba(0,0,0,.2);
+    max-width: 380px;
+}
+
+.toast-success {
+    background: #10b981;
+    color: #fff;
+}
+
+.toast-error {
+    background: #ef4444;
+    color: #fff;
 }
 
 /* ===== Cards ===== */
