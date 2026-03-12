@@ -116,7 +116,6 @@
         <thead>
             <tr>
                 <th>Framework</th>
-                <th>Description</th>
                 <th>Total Checks</th>
                 <th>Passed Checks</th>
                 <th>Failed Checks</th>
@@ -136,7 +135,6 @@
                     {% endif %}
                     {{ fw.name }}
                 </td>
-                <td class="fw-desc">{{ fw.description }}</td>
                 <td>{{ "{:,}".format(fw.total) }}</td>
                 <td>{{ "{:,}".format(fw.passed) }}</td>
                 <td>
@@ -148,7 +146,7 @@
                 </td>
                 <td>
                     <div class="score-cell">
-                        <span class="score-pct">{{ fw.score }}%</span>
+                        <span class="score-pct {% if fw.score >= 90 %}text-score-green{% elif fw.score >= 70 %}text-score-yellow{% elif fw.score >= 50 %}text-score-orange{% elif fw.score >= 20 %}text-score-red{% else %}text-score-dark-red{% endif %}">{{ fw.score }}%</span>
                         <div class="score-bar">
                             <div class="score-bar-fill {% if fw.score >= 90 %}score-green{% elif fw.score >= 70 %}score-yellow{% elif fw.score >= 50 %}score-orange{% elif fw.score >= 20 %}score-red{% else %}score-dark-red{% endif %}" style="width: {{ fw.score }}%"></div>
                         </div>
@@ -452,5 +450,26 @@ importFileInput.addEventListener('change', async () => {
         importBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> Import';
     }
 });
+
+// ── Background prefetch ──────────────────────────────────────────
+// Warm the server cache for all detail pages, then prefetch HTML
+(function() {
+    const slugs = {{ frameworks|map(attribute='slug')|list|tojson }};
+    // 1) Trigger server-side cache warmup (parses all CSVs once)
+    fetch('/api/warmup', {method: 'POST'}).then(function() {
+        // 2) Prefetch each detail page HTML so the browser caches it
+        var i = 0;
+        function next() {
+            if (i >= slugs.length) return;
+            var link = document.createElement('link');
+            link.rel = 'prefetch';
+            link.href = '/compliance/' + slugs[i];
+            document.head.appendChild(link);
+            i++;
+            setTimeout(next, 100);
+        }
+        next();
+    }).catch(function(){});
+})();
 </script>
 {% endblock %}

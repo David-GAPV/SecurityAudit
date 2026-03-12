@@ -430,8 +430,9 @@ body {
 }
 
 .provider-icon {
-    font-size: 24px;
-    line-height: 1;
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
 }
 
 /* ===== Scan Progress Ring ===== */
@@ -813,16 +814,23 @@ body.sidebar-collapsed .content {
     table-layout: fixed;
 }
 
-.section-table th:nth-child(1) { width: 30px; }
-.section-table th:nth-child(2) { width: 35%; }
-.section-table th:nth-child(3) { width: 25%; }
-.section-table th:nth-child(4) { width: 12%; }
-.section-table th:nth-child(5) { width: 12%; }
-.section-table th:nth-child(6) { width: 12%; }
+.section-table th:nth-child(1) { width: 28px; }
+.section-table th:nth-child(2) { width: 22%; }
+.section-table th:nth-child(3) { width: 30%; }
+.section-table th:nth-child(4) { width: 14%; }
+.section-table th:nth-child(5) { width: 14%; }
+.section-table th:nth-child(6) { width: 10%; }
+
+.sec-count-lg {
+    font-size: 16px;
+    font-weight: 700;
+    text-align: left;
+    vertical-align: middle;
+}
 
 .data-table th {
     text-align: left;
-    padding: 10px 12px;
+    padding: 10px 8px;
     font-size: 12px;
     font-weight: 600;
     color: var(--text-muted);
@@ -884,7 +892,7 @@ body.sidebar-collapsed .content {
 }
 
 .data-table td {
-    padding: 12px;
+    padding: 10px 8px;
     font-size: 13px;
     border-bottom: 1px solid var(--border);
     vertical-align: middle;
@@ -1048,9 +1056,17 @@ body.sidebar-collapsed .content {
 
 .score-pct-sm {
     font-weight: 600;
-    font-size: 12px;
+    font-size: 16px;
     min-width: 42px;
 }
+
+/* Score text colors matching bar colors */
+.text-score-green { color: var(--score-green); }
+.text-score-yellow { color: var(--score-yellow); }
+.text-score-orange { color: var(--score-orange); }
+.text-score-red { color: var(--score-red); }
+.text-score-dark-red { color: var(--score-dark-red); }
+.text-score-gray { color: #94a3b8; }
 
 /* ===== Detail Page ===== */
 .detail-header {
@@ -1271,7 +1287,7 @@ body.sidebar-collapsed .content {
     display: inline-block;
     padding: 3px 10px;
     border-radius: 4px;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 500;
     text-transform: capitalize;
     white-space: nowrap;
@@ -1294,16 +1310,26 @@ body.sidebar-collapsed .content {
 }
 .req-title-cell {
     font-weight: 600;
-    font-size: 12px;
+    font-size: 16px;
     color: var(--text);
 }
 .req-service {
-    font-size: 12px;
+    font-size: 18px;
     color: var(--text-muted);
+    vertical-align: middle;
+}
+.svc-icon {
+    width: 23px;
+    height: 23px;
+    object-fit: contain;
+    vertical-align: middle;
+    margin-right: 5px;
 }
 .req-count-lg {
-    font-size: 20px;
+    font-size: 29px;
     font-weight: 800;
+    vertical-align: middle;
+    text-align: center;
 }
 
 /* Resizable requirements table */

@@ -105,11 +105,11 @@
                         <div class="score-bar detail-bar">
                             <div class="score-bar-fill {% if sec.score >= 90 %}score-green{% elif sec.score >= 70 %}score-yellow{% elif sec.score >= 50 %}score-orange{% elif sec.score >= 20 %}score-red{% elif sec.score > 0 %}score-dark-red{% else %}gray{% endif %}" style="width: {{ sec.score }}%"></div>
                         </div>
-                        <span class="score-pct">{{ sec.score }}%</span>
+                        <span class="score-pct {% if sec.score >= 90 %}text-score-green{% elif sec.score >= 70 %}text-score-yellow{% elif sec.score >= 50 %}text-score-orange{% elif sec.score >= 20 %}text-score-red{% elif sec.score > 0 %}text-score-dark-red{% else %}text-score-gray{% endif %}">{{ sec.score }}%</span>
                     </div>
                 </td>
-                <td class="text-green">{{ "{:,}".format(sec.passed) }}</td>
-                <td class="text-red">{{ "{:,}".format(sec.failed) }}</td>
+                <td class="text-green sec-count-lg">{{ "{:,}".format(sec.passed) }}</td>
+                <td class="text-red sec-count-lg">{{ "{:,}".format(sec.failed) }}</td>
                 <td>{{ sec.requirement_count }}</td>
             </tr>
             <!-- Expandable requirements -->
@@ -145,7 +145,10 @@
                                         <span class="severity-badge severity-{{ req.severity|lower }}">{{ req.severity }}</span>
                                         {% endif %}
                                     </td>
-                                    <td class="req-service">{{ req.service_name }}</td>
+                                    <td class="req-service">
+                                        {% if req.service_icon %}<img class="svc-icon" src="{{ url_for('static', filename='aws_icons/' + req.service_icon) }}" alt="">{% endif %}
+                                        {{ req.service_name }}
+                                    </td>
                                     <td class="text-green req-count-lg">{{ req.passed }}</td>
                                     <td class="text-red req-count-lg">{{ req.failed }}</td>
                                     <td>
@@ -153,7 +156,7 @@
                                             <div class="score-bar mini-bar">
                                                 <div class="score-bar-fill {% if req.score >= 90 %}score-green{% elif req.score >= 70 %}score-yellow{% elif req.score >= 50 %}score-orange{% elif req.score >= 20 %}score-red{% elif req.score > 0 %}score-dark-red{% else %}gray{% endif %}" style="width: {{ req.score }}%"></div>
                                             </div>
-                                            <span class="score-pct-sm">{{ req.score }}%</span>
+                                            <span class="score-pct-sm {% if req.score >= 90 %}text-score-green{% elif req.score >= 70 %}text-score-yellow{% elif req.score >= 50 %}text-score-orange{% elif req.score >= 20 %}text-score-red{% elif req.score > 0 %}text-score-dark-red{% else %}text-score-gray{% endif %}">{{ req.score }}%</span>
                                         </div>
                                     </td>
                                 </tr>
@@ -212,13 +215,18 @@
 (function() {
     const ctx = document.getElementById('complianceDonut').getContext('2d');
     const score = {{ fw.score }};
+    let donutColor = '#10b981';
+    if (score < 20) donutColor = '#991b1b';
+    else if (score < 50) donutColor = '#ef4444';
+    else if (score < 70) donutColor = '#f97316';
+    else if (score < 90) donutColor = '#ca8a04';
     new Chart(ctx, {
         type: 'doughnut',
         data: {
             labels: ['Passed', 'Failed'],
             datasets: [{
                 data: [{{ fw.passed }}, {{ fw.failed }}],
-                backgroundColor: ['#10b981', '#e2e8f0'],
+                backgroundColor: [donutColor, '#e2e8f0'],
                 borderWidth: 0,
                 cutout: '78%'
             }]

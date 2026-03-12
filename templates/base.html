@@ -28,9 +28,9 @@
             </a></li>
         </ul>
         <div class="sidebar-bottom">
-            <button class="settings-btn" id="settingsBtn" title="Run Scan">
+            <button class="settings-btn" id="settingsBtn" title="Setting">
                 <img src="{{ url_for('static', filename='logos/setting.png') }}" alt="Run Scan">
-                <span>Run Scan</span>
+                <span>Setting</span>
             </button>
         </div>
     </nav>
@@ -53,34 +53,44 @@
                     <span class="hint" style="margin-bottom:8px;display:block">Select one or more providers to scan.</span>
                     <div class="provider-grid" id="providerGrid">
                         <button class="provider-btn" data-provider="aws" data-has-creds="1">
-                            <span class="provider-icon">☁️</span><span>AWS</span>
+                            <img class="provider-icon" src="{{ url_for('static', filename='logos/aws_run-scan-panel.png') }}" alt="AWS">
+                            <span>AWS</span>
                         </button>
                         <button class="provider-btn" data-provider="gcp">
-                            <span class="provider-icon">🌐</span><span>GCP</span>
+                            <img class="provider-icon" src="{{ url_for('static', filename='logos/gcp.jpg') }}" alt="GCP">
+                            <span>GCP</span>
                         </button>
                         <button class="provider-btn" data-provider="azure">
-                            <span class="provider-icon">🔷</span><span>Azure</span>
+                            <img class="provider-icon" src="{{ url_for('static', filename='logos/Azure.png') }}" alt="Azure">
+                            <span>Azure</span>
                         </button>
                         <button class="provider-btn" data-provider="cloudflare">
-                            <span class="provider-icon">🟠</span><span>Cloudflare</span>
+                            <img class="provider-icon" src="{{ url_for('static', filename='logos/cloudflare.webp') }}" alt="Cloudflare">
+                            <span>Cloudflare</span>
                         </button>
                         <button class="provider-btn" data-provider="alibabacloud">
-                            <span class="provider-icon">🔶</span><span>Alibaba Cloud</span>
+                            <img class="provider-icon" src="{{ url_for('static', filename='logos/alibabacloud.png') }}" alt="Alibaba Cloud">
+                            <span>Alibaba Cloud</span>
                         </button>
                         <button class="provider-btn" data-provider="kubernetes">
-                            <span class="provider-icon">⚙️</span><span>K8s</span>
+                            <img class="provider-icon" src="{{ url_for('static', filename='logos/k8s.png') }}" alt="K8s">
+                            <span>K8s</span>
                         </button>
                         <button class="provider-btn" data-provider="github">
-                            <span class="provider-icon">🐙</span><span>GitHub</span>
+                            <img class="provider-icon" src="{{ url_for('static', filename='logos/github.png') }}" alt="GitHub">
+                            <span>GitHub</span>
                         </button>
                         <button class="provider-btn" data-provider="oraclecloud">
-                            <span class="provider-icon">🔴</span><span>OCI</span>
+                            <img class="provider-icon" src="{{ url_for('static', filename='logos/OCI.png') }}" alt="OCI">
+                            <span>OCI</span>
                         </button>
                         <button class="provider-btn" data-provider="iac">
-                            <span class="provider-icon">📄</span><span>IaC</span>
+                            <img class="provider-icon" src="{{ url_for('static', filename='logos/IaC.webp') }}" alt="IaC">
+                            <span>IaC</span>
                         </button>
                         <button class="provider-btn" data-provider="openstack">
-                            <span class="provider-icon">🟢</span><span>OpenStack</span>
+                            <img class="provider-icon" src="{{ url_for('static', filename='logos/Openstack.png') }}" alt="OpenStack">
+                            <span>OpenStack</span>
                         </button>
                     </div>
                 </div>
@@ -129,7 +139,7 @@
                 </div>
                 <div class="settings-actions">
                     <button class="btn-secondary" id="awsBackBtn">← Back</button>
-                    <button class="btn-primary" id="awsRunScanBtn" disabled>Run Scan</button>
+                    <button class="btn-primary" id="awsRunScanBtn" disabled>Scan</button>
                 </div>
             </div>
 

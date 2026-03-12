@@ -43,6 +43,41 @@ _scan_state = {
     "pid": None,
 }
 
+# ---- Data cache (avoids re-parsing CSVs on every request) ----
+_data_cache = {}
+_data_cache_lock = threading.Lock()
+
+
+def _csv_dir_fingerprint():
+    """Return a fingerprint (max mtime) of all CSV files in the output dirs."""
+    mtimes = []
+    for f in glob.glob(os.path.join(COMPLIANCE_DIR, "*.csv")):
+        try:
+            mtimes.append(os.path.getmtime(f))
+        except OSError:
+            pass
+    for f in glob.glob(os.path.join(PROWLER_OUTPUT_DIR, "prowler-output-*.csv")):
+        try:
+            if os.path.abspath(os.path.dirname(f)) == os.path.abspath(PROWLER_OUTPUT_DIR):
+                mtimes.append(os.path.getmtime(f))
+        except OSError:
+            pass
+    return max(mtimes) if mtimes else 0
+
+
+def _get_cached(key, builder_fn):
+    """Return cached data, rebuilding if CSV files changed on disk."""
+    fingerprint = _csv_dir_fingerprint()
+    with _data_cache_lock:
+        entry = _data_cache.get(key)
+        if entry and entry["fp"] == fingerprint:
+            return entry["data"]
+    data = builder_fn()
+    with _data_cache_lock:
+        _data_cache[key] = {"data": data, "fp": fingerprint}
+    return data
+
+
 # Load service name display mapping
 SERVICE_NAME_MAP = {}
 _svc_map_path = os.path.join(os.path.dirname(__file__), "service_names.csv")
@@ -50,6 +85,42 @@ if os.path.exists(_svc_map_path):
     with open(_svc_map_path, encoding="utf-8") as _f:
         for _row in csv.DictReader(_f):
             SERVICE_NAME_MAP[_row["raw"].strip()] = _row["display"].strip()
+
+# Map prowler raw service name → icon path relative to static/aws_icons/
+SERVICE_ICON_MAP = {
+    "accessanalyzer": "Security-Identity-Compliance/Identity-and-Access-Management.png",
+    "account": "Management-Governance/Organizations.png",
+    "apigatewayv2": "App-Integration/API-Gateway.png",
+    "awslambda": "Compute/Lambda.png",
+    "backup": "Storage/Backup.png",
+    "bedrock": "Machine-Learning/SageMaker.png",
+    "cloudformation": "Management-Governance/CloudFormation.png",
+    "cloudtrail": "Management-Governance/CloudTrail.png",
+    "cloudwatch": "Management-Governance/CloudWatch.png",
+    "config": "Management-Governance/Config.png",
+    "drs": "Storage/Elastic-Disaster-Recovery.png",
+    "dynamodb": "Database/DynamoDB.png",
+    "ec2": "Compute/EC2.png",
+    "elbv2": "Networking-Content-Delivery/Elastic-Load-Balancing.png",
+    "emr": "Analytics/EMR.png",
+    "eventbridge": "App-Integration/EventBridge.png",
+    "guardduty": "Security-Identity-Compliance/GuardDuty.png",
+    "iam": "Security-Identity-Compliance/Identity-and-Access-Management.png",
+    "inspector2": "Security-Identity-Compliance/Inspector.png",
+    "kms": "Security-Identity-Compliance/Key-Management-Service.png",
+    "macie": "Security-Identity-Compliance/Macie.png",
+    "networkfirewall": "Security-Identity-Compliance/Network-Firewall.png",
+    "organizations": "Management-Governance/Organizations.png",
+    "rds": "Database/RDS.png",
+    "resourceexplorer2": "Management-Governance/Resource-Explorer.png",
+    "s3": "Storage/Simple-Storage-Service.png",
+    "securityhub": "Security-Identity-Compliance/Security-Hub.png",
+    "ssmincidents": "Management-Governance/Systems-Manager.png",
+    "stepfunctions": "App-Integration/Step-Functions.png",
+    "trustedadvisor": "Management-Governance/Trusted-Advisor.png",
+    "vpc": "Networking-Content-Delivery/Virtual-Private-Cloud.png",
+    "wellarchitected": "Management-Governance/Well-Architected-Tool.png",
+}
 
 # Map slug keywords to logo files and their background style
 # Each entry: (logo_filename, bg_css_class)
@@ -193,8 +264,8 @@ def parse_framework_detail(filepath):
         if r.get("STATUS", "").upper() == "PASS":
             requirements[req_id]["passed"] += 1
 
-    # Enrich with main prowler CSV data
-    main_lookup = _parse_main_prowler_csv()
+    # Enrich with main prowler CSV data (cached)
+    main_lookup = _get_cached("main_csv", _parse_main_prowler_csv)
 
     section_list = []
     for sec_name in sorted(sections.keys()):
@@ -218,6 +289,7 @@ def parse_framework_detail(filepath):
                     severity = "Manual"
                 svc_raw = enrichment.get("service_name", "")
                 service_display = SERVICE_NAME_MAP.get(svc_raw, svc_raw.replace("_", " ").title() if svc_raw else "")
+                service_icon = SERVICE_ICON_MAP.get(svc_raw, "")
                 sec_reqs.append({
                     "id": req_id,
                     "description": req_data["description"],
@@ -229,6 +301,7 @@ def parse_framework_detail(filepath):
                     "check_title": enrichment.get("check_title", ""),
                     "severity": severity,
                     "service_name": service_display,
+                    "service_icon": service_icon,
                     "status_extended": enrichment.get("status_extended", ""),
                     "risk": enrichment.get("risk", ""),
                     "remediation_text": enrichment.get("remediation_text", ""),
@@ -302,7 +375,7 @@ def _parse_main_prowler_csv():
 
 @app.route("/")
 def dashboard():
-    frameworks = parse_all_frameworks()
+    frameworks = _get_cached("frameworks", parse_all_frameworks)
     total_passed = sum(f["passed"] for f in frameworks.values())
     total_failed = sum(f["failed"] for f in frameworks.values())
     total_checks = total_passed + total_failed
@@ -325,17 +398,32 @@ def dashboard():
 
 @app.route("/compliance/<slug>")
 def compliance_detail(slug):
-    frameworks = parse_all_frameworks()
+    frameworks = _get_cached("frameworks", parse_all_frameworks)
     fw = frameworks.get(slug)
     if not fw:
         abort(404)
-    detail = parse_framework_detail(fw["filepath"])
+    detail = _get_cached(f"detail:{slug}", lambda: parse_framework_detail(fw["filepath"]))
     if not detail:
         abort(404)
     detail["slug"] = slug
     detail["logo_file"] = fw.get("logo_file")
     detail["logo_bg"] = fw.get("logo_bg")
     return render_template("detail.html", fw=detail)
+
+
+@app.route("/api/warmup", methods=["POST"])
+def api_warmup():
+    """Kick off background cache warming of all detail pages.
+
+    Returns immediately; parsing happens in a daemon thread.
+    """
+    def _warm():
+        frameworks = _get_cached("frameworks", parse_all_frameworks)
+        for slug, fw in frameworks.items():
+            _get_cached(f"detail:{slug}", lambda fp=fw["filepath"]: parse_framework_detail(fp))
+
+    threading.Thread(target=_warm, daemon=True).start()
+    return jsonify({"started": True})
 
 
 @app.route("/export")
