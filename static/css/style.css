@@ -274,8 +274,8 @@ body {
 .settings-panel {
     position: fixed;
     top: 0;
-    right: -420px;
-    width: 400px;
+    right: -480px;
+    width: 460px;
     height: 100vh;
     background: var(--card-bg);
     box-shadow: -4px 0 20px rgba(0,0,0,.1);
@@ -387,6 +387,114 @@ body {
 
 .btn-primary:hover {
     background: #6d28d9;
+}
+
+.btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* ===== Provider Grid ===== */
+.provider-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+    gap: 10px;
+}
+
+.provider-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 14px 8px;
+    border-radius: 10px;
+    border: 2px solid var(--border);
+    background: var(--card-bg);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    transition: border-color .15s, background .15s, box-shadow .15s;
+}
+
+.provider-btn:hover {
+    border-color: var(--purple);
+    background: var(--purple-light);
+}
+
+.provider-btn.selected {
+    border-color: var(--purple);
+    background: var(--purple-light);
+    box-shadow: 0 0 0 3px rgba(124, 58, 237, .18);
+}
+
+.provider-icon {
+    font-size: 24px;
+    line-height: 1;
+}
+
+/* ===== Scan Progress Ring ===== */
+.scan-progress-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    padding: 24px 0 12px;
+}
+
+.scan-ring-wrapper {
+    position: relative;
+    width: 140px;
+    height: 140px;
+}
+
+.scan-ring {
+    width: 100%;
+    height: 100%;
+    transform: rotate(-90deg);
+}
+
+.scan-ring-bg {
+    fill: none;
+    stroke: var(--border);
+    stroke-width: 10;
+}
+
+.scan-ring-fill {
+    fill: none;
+    stroke: var(--purple);
+    stroke-width: 10;
+    stroke-linecap: round;
+    transition: stroke-dashoffset .6s ease;
+}
+
+.scan-ring-text {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.scan-ring-pct {
+    font-size: 28px;
+    font-weight: 800;
+    color: var(--text);
+}
+
+.scan-phase {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    text-align: center;
+}
+
+.scan-provider-label {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: .5px;
 }
 
 .btn-secondary {

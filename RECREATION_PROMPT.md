@@ -76,6 +76,28 @@ slug = parts[1].replace(".csv", "")
 # e.g. "cis_3.0_aws" from "prowler-output-..._cis_3.0_aws.csv"
 ```
 
+### 2.4 Main Prowler Output CSV
+Located at `../prowler/output/prowler-output-*.csv` (flat files in the output root, **not** in `compliance/`). Also semicolon-delimited. Used to enrich requirements with severity, service name, risk, and remediation data.
+
+Key columns used (42 total):
+
+| Column | Description |
+|--------|-------------|
+| `CHECK_ID` | Prowler check identifier (join key) |
+| `CHECK_TITLE` | Human-readable check name |
+| `SEVERITY` | `critical`, `high`, `medium`, `low`, `informational` |
+| `SERVICE_NAME` | Raw service slug (e.g. `awslambda`, `securityhub`) |
+| `STATUS_EXTENDED` | Detailed status explanation |
+| `RISK` | Exposure risk description |
+| `REMEDIATION_RECOMMENDATION_TEXT` | Fix recommendation |
+| `REMEDIATION_RECOMMENDATION_URL` | URL to remediation docs |
+| `ADDITIONAL_URLS` | Pipe-separated additional reference URLs |
+
+### 2.5 Service Name Mapping (`service_names.csv`)
+Located at `compliance-dashboard/service_names.csv`. Two-column CSV (`raw,display`) mapping 32 raw prowler service slugs to human-readable display names.
+
+Examples: `accessanalyzer → IAM Access Analyzer`, `awslambda → Lambda`, `securityhub → Security Hub`, `elbv2 → ELB V2`.
+
 ---
 
 ## 3. File Structure
@@ -83,6 +105,7 @@ slug = parts[1].replace(".csv", "")
 ```
 compliance-dashboard/
 ├── app.py                          # Flask backend
+├── service_names.csv               # Maps raw prowler service slugs to display names (32 entries)
 ├── images_logo/                    # Reference screenshots + logo source files
 │   ├── main_dashboard.png          # Screenshot: Main dashboard
 │   ├── detailed_compliance_CIS_AWSv3.png  # Screenshot: Detail page
@@ -132,16 +155,39 @@ compliance-dashboard/
 
 ```python
 import csv
-import os
 import glob
+import io
+import json
+import os
+import re
+import shutil
+import zipfile
 from collections import defaultdict
-from flask import Flask, render_template, abort
+from flask import Flask, abort, jsonify, render_template, request, send_file
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB upload limit
+
+
+@app.errorhandler(413)
+def request_too_large(e):
+    return jsonify({"error": "File too large. Maximum upload size is 500 MB."}), 413
 
 COMPLIANCE_DIR = os.path.join(
     os.path.dirname(__file__), "..", "prowler", "output", "compliance"
 )
+
+PROWLER_OUTPUT_DIR = os.path.join(
+    os.path.dirname(__file__), "..", "prowler", "output"
+)
+
+# Load service name display mapping
+SERVICE_NAME_MAP = {}
+_svc_map_path = os.path.join(os.path.dirname(__file__), "service_names.csv")
+if os.path.exists(_svc_map_path):
+    with open(_svc_map_path, encoding="utf-8") as _f:
+        for _row in csv.DictReader(_f):
+            SERVICE_NAME_MAP[_row["raw"].strip()] = _row["display"].strip()
 
 # Map slug keywords to logo files and their background style
 # Each entry: (keywords_list, logo_filename, bg_css_class)
@@ -257,8 +303,8 @@ def parse_framework_detail(filepath):
         if req_id:
             sections[section]["requirements"].add(req_id)
 
-    # Build requirement-level detail
-    requirements = defaultdict(lambda: {"total": 0, "passed": 0, "description": "", "section": "", "status_extended": []})
+    # Build requirement-level detail (collecting resource-level rows per requirement)
+    requirements = defaultdict(lambda: {"total": 0, "passed": 0, "description": "", "section": "", "check_ids": set(), "resources": []})
     for r in rows:
         req_id = r.get("REQUIREMENTS_ID", "").strip()
         if not req_id:
@@ -266,8 +312,25 @@ def parse_framework_detail(filepath):
         requirements[req_id]["total"] += 1
         requirements[req_id]["description"] = r.get("REQUIREMENTS_DESCRIPTION", "").strip()
         requirements[req_id]["section"] = r.get("REQUIREMENTS_ATTRIBUTES_SECTION", "").strip()
+        check_id = r.get("CHECKID", "").strip()
+        if check_id:
+            requirements[req_id]["check_ids"].add(check_id)
+        # Collect resource-level data
+        resource_id = r.get("RESOURCEID", "").strip()
+        if resource_id:
+            requirements[req_id]["resources"].append({
+                "resource_id": resource_id,
+                "resource_name": r.get("RESOURCENAME", "").strip(),
+                "status": r.get("STATUS", "").strip().upper(),
+                "status_extended": r.get("STATUSEXTENDED", "").strip(),
+                "region": r.get("REGION", "").strip(),
+                "check_id": check_id,
+            })
         if r.get("STATUS", "").upper() == "PASS":
             requirements[req_id]["passed"] += 1
+
+    # Enrich requirements from main prowler output CSV
+    main_lookup = _parse_main_prowler_csv()
 
     section_list = []
     for sec_name in sorted(sections.keys()):
@@ -277,6 +340,19 @@ def parse_framework_detail(filepath):
         for req_id, req_data in sorted(requirements.items()):
             if req_data["section"] == sec_name or (sec_name == "Uncategorized" and not req_data["section"]):
                 req_score = round((req_data["passed"] / req_data["total"]) * 100, 2) if req_data["total"] else 0
+                # Enrich from main CSV using the first matching check_id
+                enrichment = {}
+                for cid in req_data["check_ids"]:
+                    if cid in main_lookup:
+                        enrichment = main_lookup[cid]
+                        break
+                severity_raw = enrichment.get("severity", "")
+                severity = severity_raw.capitalize() if severity_raw else ""
+                # For requirements with only manual checks, show Manual badge
+                if not severity and req_data["check_ids"] and all(c == "manual" for c in req_data["check_ids"]):
+                    severity = "Manual"
+                svc_raw = enrichment.get("service_name", "")
+                service_display = SERVICE_NAME_MAP.get(svc_raw, svc_raw.replace("_", " ").title() if svc_raw else "")
                 sec_reqs.append({
                     "id": req_id,
                     "description": req_data["description"],
@@ -284,6 +360,21 @@ def parse_framework_detail(filepath):
                     "passed": req_data["passed"],
                     "failed": req_data["total"] - req_data["passed"],
                     "score": req_score,
+                    "check_id": enrichment.get("check_id", ""),
+                    "check_title": enrichment.get("check_title", ""),
+                    "severity": severity,
+                    "service_name": service_display,
+                    "status_extended": enrichment.get("status_extended", ""),
+                    "risk": enrichment.get("risk", ""),
+                    "remediation_text": enrichment.get("remediation_text", ""),
+                    "remediation_url": enrichment.get("remediation_url", ""),
+                    "additional_urls": enrichment.get("additional_urls", ""),
+                    "resources": req_data["resources"],
+                    "resources_lookup": {
+                        cid: SERVICE_NAME_MAP.get(main_lookup[cid]["service_name"],
+                             main_lookup[cid]["service_name"].replace("_", " ").title())
+                        for cid in req_data["check_ids"] if cid in main_lookup
+                    },
                 })
         section_list.append({
             "name": sec_name,
@@ -317,6 +408,34 @@ def _read_csv(filepath):
         for row in reader:
             rows.append(row)
     return rows
+
+
+def _parse_main_prowler_csv():
+    """Parse the main prowler output CSV and build a lookup by CHECK_ID."""
+    csv_files = sorted(glob.glob(os.path.join(PROWLER_OUTPUT_DIR, "prowler-output-*.csv")))
+    # Exclude files in subdirectories (compliance/)
+    csv_files = [f for f in csv_files if os.path.abspath(os.path.dirname(f)) == os.path.abspath(PROWLER_OUTPUT_DIR)]
+    if not csv_files:
+        return {}
+    rows = _read_csv(csv_files[0])
+    lookup = {}
+    for r in rows:
+        check_id = r.get("CHECK_ID", "").strip()
+        if not check_id:
+            continue
+        if check_id not in lookup:
+            lookup[check_id] = {
+                "check_id": check_id,
+                "check_title": r.get("CHECK_TITLE", "").strip(),
+                "severity": r.get("SEVERITY", "").strip(),
+                "service_name": r.get("SERVICE_NAME", "").strip(),
+                "status_extended": r.get("STATUS_EXTENDED", "").strip(),
+                "risk": r.get("RISK", "").strip(),
+                "remediation_text": r.get("REMEDIATION_RECOMMENDATION_TEXT", "").strip(),
+                "remediation_url": r.get("REMEDIATION_RECOMMENDATION_URL", "").strip(),
+                "additional_urls": r.get("ADDITIONAL_URLS", "").strip(),
+            }
+    return lookup
 
 
 @app.route("/")
@@ -356,6 +475,131 @@ def compliance_detail(slug):
     return render_template("detail.html", fw=detail)
 
 
+@app.route("/export")
+def export_data():
+    """Package the prowler output directory into a ZIP for download."""
+    output_dir = os.path.abspath(PROWLER_OUTPUT_DIR)
+    compliance_dir = os.path.abspath(COMPLIANCE_DIR)
+
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Main output files (csv, html, ocsf.json) in the root of the ZIP
+        for f in sorted(glob.glob(os.path.join(output_dir, "prowler-output-*"))):
+            if os.path.isfile(f) and os.path.abspath(os.path.dirname(f)) == output_dir:
+                zf.write(f, os.path.basename(f))
+        # Compliance CSVs under compliance/ subfolder
+        for f in sorted(glob.glob(os.path.join(compliance_dir, "*.csv"))):
+            if os.path.isfile(f):
+                zf.write(f, os.path.join("compliance", os.path.basename(f)))
+
+    mem.seek(0)
+    return send_file(
+        mem,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="prowler-output-export.zip",
+    )
+
+
+@app.route("/import", methods=["POST"])
+def import_data():
+    """Accept a ZIP upload matching the prowler output structure."""
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    uploaded = request.files["file"]
+    if not uploaded.filename.lower().endswith(".zip"):
+        return jsonify({"error": "File must be a .zip archive"}), 400
+
+    try:
+        data = uploaded.read()
+    except Exception as e:
+        return jsonify({"error": "Failed to read uploaded file: " + str(e)}), 400
+
+    try:
+        zf_obj = zipfile.ZipFile(io.BytesIO(data), "r")
+    except zipfile.BadZipFile:
+        return jsonify({"error": "Invalid or corrupted ZIP file"}), 400
+    except Exception as e:
+        return jsonify({"error": "Failed to open ZIP: " + str(e)}), 400
+
+    try:
+        with zf_obj as zf:
+            raw_names = zf.namelist()
+
+            # Detect and strip a single common folder prefix (e.g. "output/" or "prowler-output-xxx/")
+            # so users can zip the output folder itself and still have it work.
+            prefix = ""
+            top_level = {n.split("/")[0] for n in raw_names if n}
+            if len(top_level) == 1:
+                candidate = list(top_level)[0] + "/"
+                # Only treat as prefix if there are no prowler-output CSVs at the true root
+                root_at_true = [n for n in raw_names if re.match(r"^prowler-output-[^/]+\.csv$", n)]
+                if not root_at_true:
+                    prefix = candidate
+
+            def strip(name):
+                return name[len(prefix):] if prefix and name.startswith(prefix) else name
+
+            names = [strip(n) for n in raw_names]
+
+            # Validate: must have at least one root prowler-output-*.csv and compliance/ CSVs
+            root_csvs = [n for n in names if re.match(r"^prowler-output-[^/]+\.csv$", n)]
+            compliance_csvs = [n for n in names if re.match(r"^compliance/prowler-output-[^/]+\.csv$", n)]
+
+            if not root_csvs:
+                return jsonify({"error": (
+                    "ZIP must contain a prowler-output-*.csv in the root. "
+                    "Export using the Export button on this page to get the correct format."
+                )}), 400
+            if not compliance_csvs:
+                return jsonify({"error": (
+                    "ZIP must contain compliance/prowler-output-*.csv files. "
+                    "Export using the Export button on this page to get the correct format."
+                )}), 400
+
+            output_dir = os.path.abspath(PROWLER_OUTPUT_DIR)
+            compliance_dir = os.path.abspath(COMPLIANCE_DIR)
+
+            # Remove existing files (skip ZIP files themselves)
+            for old in glob.glob(os.path.join(output_dir, "prowler-output-*")):
+                if (os.path.isfile(old)
+                        and os.path.abspath(os.path.dirname(old)) == output_dir
+                        and not old.lower().endswith(".zip")):
+                    os.remove(old)
+            for old in glob.glob(os.path.join(compliance_dir, "*.csv")):
+                if os.path.isfile(old):
+                    os.remove(old)
+
+            os.makedirs(compliance_dir, exist_ok=True)
+
+            # Extract with path-traversal protection
+            allowed_root = re.compile(r"^prowler-output-[^/]+\.(csv|html|json)$")
+            allowed_compliance = re.compile(r"^compliance/prowler-output-[^/]+\.csv$")
+
+            extracted = 0
+            for raw_name, norm_name in zip(raw_names, names):
+                if allowed_root.match(norm_name):
+                    target = os.path.normpath(os.path.join(output_dir, os.path.basename(norm_name)))
+                    if not target.startswith(output_dir + os.sep):
+                        continue
+                elif allowed_compliance.match(norm_name):
+                    target = os.path.normpath(os.path.join(compliance_dir, os.path.basename(norm_name)))
+                    if not target.startswith(compliance_dir + os.sep):
+                        continue
+                else:
+                    continue
+
+                with zf.open(raw_name) as src, open(target, "wb") as dst:
+                    dst.write(src.read())
+                extracted += 1
+
+    except Exception as e:
+        return jsonify({"error": "Import failed: " + str(e)}), 500
+
+    return jsonify({"success": True, "extracted": extracted})
+
+
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)
 ```
@@ -367,9 +611,10 @@ if __name__ == "__main__":
 ### 5.1 `base.html` — Base Layout
 
 Key elements:
+- **Favicon**: `<link rel="icon" type="image/webp" href="{{ url_for('static', filename='logos/icon_gapv.webp') }}">` — uses the company icon as the browser tab icon.
 - **Chart.js v4.4.7 via CDN**: `https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js`
 - **Collapsible sidebar** (`nav.sidebar#sidebar`):
-  - **Brand section**: Two logos — `gapv.webp` (full, shown when open, 126px height, -0.5cm left margin) and `icon_gapv.webp` (icon, shown when collapsed, 36×36px). Title text: "CloudGuard" (20px bold, hidden when collapsed).
+  - **Brand section**: The brand div content is wrapped in `<a href="/" class="sidebar-brand-link">` so clicking the logo navigates to the dashboard. Two logos — `gapv.webp` (full, shown when open, 126px height, -0.5cm left margin) and `icon_gapv.webp` (icon, shown when collapsed, 36×36px). Title text: "Cloud Guard" (shown when expanded, hidden when collapsed).
   - **Navigation**: Single item "Compliance" with grid SVG icon, links to `/`, active state based on `request.endpoint`.
   - **Settings button** at bottom with `setting.png` icon.
   - **Toggle behavior**: `.sidebar-toggle` button is hidden (`display: none`). Instead, clicking any empty area of the sidebar toggles `collapsed` class on sidebar and `sidebar-collapsed` class on body. Interactive elements (links, buttons, inputs) are excluded from toggle via `e.target.closest()`.
@@ -388,6 +633,7 @@ Key elements:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}G-Cloud Guard{% endblock %}</title>
+    <link rel="icon" type="image/webp" href="{{ url_for('static', filename='logos/icon_gapv.webp') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     {% block head %}{% endblock %}
@@ -395,9 +641,11 @@ Key elements:
 <body>
     <nav class="sidebar" id="sidebar">
         <div class="sidebar-brand">
-            <img src="{{ url_for('static', filename='logos/gapv.webp') }}" alt="G-ASIAPACIFIC" class="brand-logo brand-logo-full">
-            <img src="{{ url_for('static', filename='logos/icon_gapv.webp') }}" alt="G-ASIAPACIFIC" class="brand-logo brand-logo-icon">
-            <span class="brand-title">CloudGuard</span>
+            <a href="/" class="sidebar-brand-link">
+                <img src="{{ url_for('static', filename='logos/gapv.webp') }}" alt="G-ASIAPACIFIC" class="brand-logo brand-logo-full">
+                <img src="{{ url_for('static', filename='logos/icon_gapv.webp') }}" alt="G-ASIAPACIFIC" class="brand-logo brand-logo-icon">
+                <span class="brand-title">Cloud Guard</span>
+            </a>
         </div>
         <div class="sidebar-toggle" id="sidebarToggle" title="Toggle sidebar">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
@@ -533,11 +781,15 @@ Key elements:
 
 ### 5.2 `dashboard.html` — Main Dashboard
 
-Key elements:
 - Extends `base.html`
+- **Page title row**: `<div class="page-title-row">` containing the `<h1 class="page-title">Compliance</h1>` on the left and `<div class="page-actions">` on the right with two buttons:
+  - **Import button** (`<button class="io-btn" id="importBtn">` with upload arrow SVG icon) — triggers hidden file input
+  - **Export button** (`<a class="io-btn" href="/export" download>` with download arrow SVG icon) — direct link download
+  - **Hidden file input**: `<input type="file" id="importFileInput" accept=".zip" style="display:none">`
+  - **Import toast**: `<div id="importToast" class="import-toast" style="display:none"></div>` — fixed top-right notification
 - **Stats Row** (CSS Grid: `220px 180px 1fr`):
   1. **Posture Score Gauge** — Chart.js doughnut, 180° arc (semicircle), score % centered below arc
-  2. **Passed / Failed stacked** — Two cards vertically stacked, large 32px numbers
+  2. **Passed / Failed stacked** — Two cards vertically stacked, large 32px numbers. Passed is colored `#10b981`, Failed is colored `#ef4444`.
   3. **Top 5 Lowest Scoring** — Horizontal bar chart with 5-tier colors, draggable y-axis resize handle
 - **Framework Table**:
   - Header with "Framework view" title and item count
@@ -548,13 +800,34 @@ Key elements:
   - **Resizable columns** via drag handles on column headers
   - **Logo display**: Each framework row shows a small logo badge (30×30px) — AWS logos get dark background (`logo-bg-dark`), all others white with border (`logo-bg-white`). Frameworks without a mapped logo show a 3-letter purple badge.
   - **5-tier score colors**: ≥90% green, ≥70% yellow, ≥50% orange, ≥20% red, <20% dark red
+- **Import JS** (in `{% block scripts %}`):
+  - `showToast(msg, isError)` — shows fixed toast in top-right corner for 5 seconds
+  - Import button click triggers file picker
+  - File picker `change` event: builds `FormData`, sends `POST /import`, checks `Content-Type` before calling `.json()` to guard against non-JSON error responses, shows success toast and reloads after 1800ms, or shows error toast
+  - Button text/state restored in `finally`
 
 ```html
 {% extends "base.html" %}
 {% block title %}G-Cloud Guard{% endblock %}
 
 {% block content %}
-<h1 class="page-title">Compliance</h1>
+<div class="page-title-row">
+    <h1 class="page-title">Compliance</h1>
+    <div class="page-actions">
+        <button class="io-btn" id="importBtn" title="Import a prowler output ZIP">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Import
+        </button>
+        <a class="io-btn" href="/export" download>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Export
+        </a>
+    </div>
+</div>
+<!-- Hidden file picker for import -->
+<input type="file" id="importFileInput" accept=".zip" style="display:none">
+<!-- Import toast notification -->
+<div id="importToast" class="import-toast" style="display:none"></div>
 
 <!-- Top Stats Row -->
 <div class="stats-row">
@@ -933,6 +1206,55 @@ document.getElementById('frameworkSearch').addEventListener('input', applyFilter
 document.getElementById('filterProvider').addEventListener('change', applyFilters);
 document.getElementById('filterScore').addEventListener('change', applyFilters);
 document.getElementById('filterFailed').addEventListener('change', applyFilters);
+
+// ── Import / Export ──────────────────────────────────────────────
+const importBtn = document.getElementById('importBtn');
+const importFileInput = document.getElementById('importFileInput');
+const importToast = document.getElementById('importToast');
+
+function showToast(msg, isError) {
+    importToast.textContent = msg;
+    importToast.className = 'import-toast ' + (isError ? 'toast-error' : 'toast-success');
+    importToast.style.display = 'block';
+    clearTimeout(importToast._timer);
+    importToast._timer = setTimeout(() => { importToast.style.display = 'none'; }, 5000);
+}
+
+importBtn.addEventListener('click', () => importFileInput.click());
+
+importFileInput.addEventListener('change', async () => {
+    const file = importFileInput.files[0];
+    if (!file) return;
+    importFileInput.value = '';
+
+    importBtn.disabled = true;
+    importBtn.textContent = 'Importing…';
+
+    const form = new FormData();
+    form.append('file', file);
+
+    try {
+        const res = await fetch('/import', { method: 'POST', body: form });
+        // Guard against non-JSON responses (e.g. HTML 404/500 from server restart)
+        const ct = res.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) {
+            showToast('Import failed: server returned an unexpected response (HTTP ' + res.status + '). Try again.', true);
+            return;
+        }
+        const json = await res.json();
+        if (json.success) {
+            showToast('Import successful (' + json.extracted + ' files). Reloading…', false);
+            setTimeout(() => location.reload(), 1800);
+        } else {
+            showToast('Import failed: ' + (json.error || 'Unknown error'), true);
+        }
+    } catch (e) {
+        showToast('Import failed: ' + e.message, true);
+    } finally {
+        importBtn.disabled = false;
+        importBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> Import';
+    }
+});
 </script>
 {% endblock %}
 ```
@@ -945,11 +1267,25 @@ Key elements:
 - **Overview row** (CSS Grid: `1fr 1fr`):
   1. **Compliance Donut** — Chart.js full doughnut (220×220), pass=green / fail=gray, percentage centered. Next to it: "Requirements" count and "Sections" count with icons.
   2. **Summary Stats** — 3-column grid (Provider, Account ID, Total Checks) + row 2 has Passed (white bg, green left border, 28px font) and Failed (white bg, red left border, 28px font). Below: stacked horizontal bar chart (passed green + failed red).
-- **Sections Table** (fixed layout with column widths: 30px / 35% / 25% / 12% / 12% / 12%):
+- **Sections Table** (fixed layout: 30px / 35% / 25% / 12% / 12% / 12%):
   - Expandable rows — click to reveal nested requirements table
   - Chevron rotates 90° on expand
   - Each section shows: name, compliance posture bar, passed, failed, requirement count
-  - Nested requirements table: Requirement ID (purple), Description, Passed, Failed, Score mini-bar
+  - **Nested requirements table** (resizable, columns: 50% / 8% / 12% / 8% / 8% / 14%): Title, Severity, Service Name, Passed, Failed, Score mini-bar
+  - Each requirement row is clickable (`req-clickable-row`) — opens the detail panel
+  - Row has `data-req-id`, `data-req-title`, `data-req-severity`, `data-req-status-ext`, `data-req-remediation`, `data-req-risk`, `data-req-urls`, `data-req-resources` (JSON array), `data-req-res-lookup` (JSON object) attributes
+  - Severity shown as `<span class="severity-badge severity-<level>">` — classes: `severity-critical`, `severity-high`, `severity-medium`, `severity-low`, `severity-informational`, `severity-manual`
+- **Requirement Detail Panel** (right slide-over, 500px wide, `req-detail-panel`):
+  - `transform: translateX(100%)` when closed; `translateX(0)` when `.open`
+  - Dark overlay (`req-panel-overlay`) behind panel
+  - **Drag handle** (`req-panel-drag-handle`, 6px wide, left edge) — drag leftward to widen panel, min 350px, max viewport-40px
+  - **Header**: `[req_id]` bracket in purple, title, severity badge (all on same line, flex-wrap)
+  - **Body sections**: Description, Resources (table), Recommendation, Exposure Risk, Additional References
+  - **Resources table**: columns Resource (name + resource_id as title tooltip), Region, Service, Status (`Pass`/`Fail` colored badges)
+  - Service lookup uses `resLookup[check_id]` from `data-req-res-lookup`
+  - **Markdown renderer** `md(text)`: escapes HTML, converts `**bold**` → `<strong>`, `` `code` `` → `<code>`, `\n` → `<br>`
+  - Additional References: pipe-separated URLs rendered as `<a>` tags
+  - Requirements tables made resizable via `MutationObserver` watching `.class` changes on `.table-section`
 
 ```html
 {% extends "base.html" %}
@@ -975,6 +1311,7 @@ Key elements:
 
 <!-- Overview Row -->
 <div class="detail-overview">
+    <!-- Compliance Donut -->
     <div class="card detail-score-card">
         <div class="donut-wrapper">
             <canvas id="complianceDonut" width="220" height="220"></canvas>
@@ -1001,6 +1338,7 @@ Key elements:
         </div>
     </div>
 
+    <!-- Summary Stats -->
     <div class="card detail-summary-card">
         <div class="detail-summary-grid">
             <div class="summary-item">
@@ -1024,6 +1362,7 @@ Key elements:
                 <div class="summary-value text-red">{{ "{:,}".format(fw.failed) }}</div>
             </div>
         </div>
+        <!-- Score bar chart -->
         <div class="score-breakdown-chart">
             <canvas id="scoreBreakdown" height="60"></canvas>
         </div>
@@ -1063,26 +1402,42 @@ Key elements:
                 <td class="text-red">{{ "{:,}".format(sec.failed) }}</td>
                 <td>{{ sec.requirement_count }}</td>
             </tr>
+            <!-- Expandable requirements -->
             <tr class="requirements-row hidden" data-parent="{{ loop.index }}">
                 <td colspan="6">
                     <div class="requirements-container">
-                        <table class="requirements-table">
+                        <table class="requirements-table resizable-req-table">
                             <thead>
                                 <tr>
-                                    <th>Requirement ID</th>
-                                    <th>Description</th>
-                                    <th>Passed</th>
-                                    <th>Failed</th>
-                                    <th>Score</th>
+                                    <th style="width:50%">Title</th>
+                                    <th style="width:8%">Severity</th>
+                                    <th style="width:12%">Service Name</th>
+                                    <th style="width:8%">Passed</th>
+                                    <th style="width:8%">Failed</th>
+                                    <th style="width:14%">Score</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {% for req in sec.requirements %}
-                                <tr>
-                                    <td class="req-id">{{ req.id }}</td>
-                                    <td class="req-desc">{{ req.description }}</td>
-                                    <td class="text-green">{{ req.passed }}</td>
-                                    <td class="text-red">{{ req.failed }}</td>
+                                <tr class="req-clickable-row"
+                                    data-req-id="{{ req.id }}"
+                                    data-req-title="{{ req.check_title or req.description }}"
+                                    data-req-severity="{{ req.severity }}"
+                                    data-req-status-ext="{{ req.status_extended }}"
+                                    data-req-remediation="{{ req.remediation_text }}"
+                                    data-req-risk="{{ req.risk }}"
+                                    data-req-urls="{{ req.additional_urls }}"
+                                    data-req-resources='{{ req.resources | tojson }}'
+                                    data-req-res-lookup='{{ req.resources_lookup | tojson }}'>
+                                    <td class="req-title-cell">{{ req.check_title or req.description or req.id }}</td>
+                                    <td>
+                                        {% if req.severity %}
+                                        <span class="severity-badge severity-{{ req.severity|lower }}">{{ req.severity }}</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="req-service">{{ req.service_name }}</td>
+                                    <td class="text-green req-count-lg">{{ req.passed }}</td>
+                                    <td class="text-red req-count-lg">{{ req.failed }}</td>
                                     <td>
                                         <div class="score-cell">
                                             <div class="score-bar mini-bar">
@@ -1101,6 +1456,43 @@ Key elements:
             {% endfor %}
         </tbody>
     </table>
+</div>
+<!-- Requirement Detail Panel -->
+<div class="req-panel-overlay" id="reqPanelOverlay"></div>
+<div class="req-detail-panel" id="reqDetailPanel">
+    <div class="req-panel-drag-handle" id="reqPanelDragHandle"></div>
+    <div class="req-panel-header">
+        <div class="req-panel-title-row">
+            <span class="req-panel-id-bracket">[<span id="reqPanelId"></span>]</span>
+            <span class="req-panel-title" id="reqPanelTitle"></span>
+            <span class="severity-badge" id="reqPanelSeverity"></span>
+        </div>
+        <button class="req-panel-close" id="reqPanelClose">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+        </button>
+    </div>
+    <div class="req-panel-body">
+        <div class="req-panel-section">
+            <h4>Description</h4>
+            <div id="reqPanelDesc"></div>
+        </div>
+        <div class="req-panel-section" id="reqPanelResourcesSection" style="display:none">
+            <h4>Resources</h4>
+            <div id="reqPanelResources" class="req-panel-resources"></div>
+        </div>
+        <div class="req-panel-section">
+            <h4>Recommendation</h4>
+            <div id="reqPanelRemediation"></div>
+        </div>
+        <div class="req-panel-section">
+            <h4>Exposure Risk</h4>
+            <div id="reqPanelRisk"></div>
+        </div>
+        <div class="req-panel-section" id="reqPanelUrlsSection" style="display:none">
+            <h4>Additional References</h4>
+            <div id="reqPanelUrls"></div>
+        </div>
+    </div>
 </div>
 {% endblock %}
 
@@ -1165,6 +1557,176 @@ document.querySelectorAll('.section-row').forEach(row => {
         chevron.classList.toggle('rotated');
     });
 });
+
+// ===== Resizable Requirements Table Columns =====
+function makeReqTableResizable(table) {
+    const thead = table.querySelector('thead tr');
+    if (!thead) return;
+    const cols = thead.querySelectorAll('th');
+    cols.forEach(th => { th.style.width = th.offsetWidth + 'px'; });
+    table.style.tableLayout = 'fixed';
+
+    cols.forEach(th => {
+        const handle = document.createElement('div');
+        handle.className = 'resize-handle';
+        th.style.position = 'relative';
+        th.appendChild(handle);
+
+        let startX, startW;
+        handle.addEventListener('mousedown', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            startX = e.pageX;
+            startW = th.offsetWidth;
+            handle.classList.add('active');
+            table.classList.add('resizing');
+
+            function onMove(ev) {
+                const w = Math.max(40, startW + (ev.pageX - startX));
+                th.style.width = w + 'px';
+            }
+            function onUp() {
+                handle.classList.remove('active');
+                table.classList.remove('resizing');
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            }
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+    });
+}
+
+// Observe for newly expanded requirement tables and make them resizable
+const observer = new MutationObserver(() => {
+    document.querySelectorAll('.resizable-req-table').forEach(table => {
+        if (!table.dataset.resizable) {
+            table.dataset.resizable = '1';
+            requestAnimationFrame(() => makeReqTableResizable(table));
+        }
+    });
+});
+observer.observe(document.querySelector('.table-section'), { subtree: true, attributes: true, attributeFilter: ['class'] });
+
+// ===== Requirement Detail Panel =====
+(function() {
+    const overlay = document.getElementById('reqPanelOverlay');
+    const panel = document.getElementById('reqDetailPanel');
+    const closeBtn = document.getElementById('reqPanelClose');
+    const dragHandle = document.getElementById('reqPanelDragHandle');
+
+    // Simple markdown-to-HTML: **bold**, `code`, newlines
+    function md(text) {
+        if (!text) return '';
+        let h = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+        h = h.replace(/\n/g, '<br>');
+        return h;
+    }
+
+    function openPanel(row) {
+        const reqId = row.dataset.reqId || '';
+        const title = row.dataset.reqTitle || '';
+        const severity = row.dataset.reqSeverity || '';
+        const statusExt = row.dataset.reqStatusExt || '';
+        const remediation = row.dataset.reqRemediation || '';
+        const risk = row.dataset.reqRisk || '';
+        const urls = row.dataset.reqUrls || '';
+        let resources = [];
+        let resLookup = {};
+        try { resources = JSON.parse(row.dataset.reqResources || '[]'); } catch(e) {}
+        try { resLookup = JSON.parse(row.dataset.reqResLookup || '{}'); } catch(e) {}
+
+        document.getElementById('reqPanelId').textContent = reqId;
+        document.getElementById('reqPanelTitle').textContent = title;
+
+        const sevBadge = document.getElementById('reqPanelSeverity');
+        sevBadge.textContent = severity;
+        sevBadge.className = 'severity-badge' + (severity ? ' severity-' + severity.toLowerCase() : '');
+        sevBadge.style.display = severity ? '' : 'none';
+
+        document.getElementById('reqPanelDesc').innerHTML = md(statusExt) || 'No description available.';
+        document.getElementById('reqPanelRemediation').innerHTML = md(remediation) || 'No recommendation available.';
+        document.getElementById('reqPanelRisk').innerHTML = md(risk) || 'No risk information available.';
+
+        // Resources table
+        const resSection = document.getElementById('reqPanelResourcesSection');
+        const resContainer = document.getElementById('reqPanelResources');
+        if (resources.length > 0) {
+            resSection.style.display = '';
+            resContainer.innerHTML = '<table class="req-resources-table"><thead><tr><th>Resource</th><th>Region</th><th>Service</th><th>Status</th></tr></thead><tbody>' +
+                resources.map(r => {
+                    const name = r.resource_name || r.resource_id;
+                    const cls = r.status === 'PASS' ? 'res-pass' : 'res-fail';
+                    const label = r.status === 'PASS' ? 'Pass' : 'Fail';
+                    const region = (r.region || '').replace(/</g,'&lt;');
+                    const svc = (resLookup[r.check_id] || '').replace(/</g,'&lt;');
+                    return '<tr><td class="res-name" title="' + (r.resource_id || '').replace(/"/g,'&quot;') + '">' +
+                        (name || '').replace(/</g,'&lt;') +
+                        '</td><td class="res-region">' + region + '</td><td class="res-service">' + svc + '</td><td><span class="res-status ' + cls + '">' + label + '</span></td></tr>';
+                }).join('') + '</tbody></table>';
+        } else {
+            resSection.style.display = 'none';
+        }
+
+        const urlsSection = document.getElementById('reqPanelUrlsSection');
+        const urlsContainer = document.getElementById('reqPanelUrls');
+        if (urls && urls.trim()) {
+            urlsSection.style.display = '';
+            const urlList = urls.split('|').map(u => u.trim()).filter(u => u);
+            urlsContainer.innerHTML = urlList.map(u =>
+                '<a href="' + u.replace(/"/g, '&quot;') + '" target="_blank" rel="noopener noreferrer">' +
+                u.replace(/</g, '&lt;') + '</a>'
+            ).join('<br>');
+        } else {
+            urlsSection.style.display = 'none';
+        }
+
+        overlay.classList.add('open');
+        panel.classList.add('open');
+    }
+
+    function closePanel() {
+        overlay.classList.remove('open');
+        panel.classList.remove('open');
+    }
+
+    overlay.addEventListener('click', closePanel);
+    closeBtn.addEventListener('click', closePanel);
+
+    document.addEventListener('click', (e) => {
+        const row = e.target.closest('.req-clickable-row');
+        if (row) {
+            e.stopPropagation();
+            openPanel(row);
+        }
+    });
+
+    // ===== Drag-to-resize panel =====
+    let dragStartX, dragStartW;
+    dragHandle.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        dragStartX = e.clientX;
+        dragStartW = panel.offsetWidth;
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+
+        function onMove(ev) {
+            const delta = dragStartX - ev.clientX;
+            const newW = Math.max(350, Math.min(window.innerWidth - 40, dragStartW + delta));
+            panel.style.width = newW + 'px';
+        }
+        function onUp() {
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+})();
 </script>
 {% endblock %}
 ```
@@ -1202,13 +1764,25 @@ document.querySelectorAll('.section-row').forEach(row => {
 ### 6.3 Key CSS Behaviors
 
 1. **Sidebar collapse**: `.sidebar.collapsed` → width 56px. `.sidebar.collapsed .brand-logo-full` hidden, `.brand-logo-icon` shown. All text spans hidden in collapsed state.
-2. **Content margin**: `.content` has `margin-left: var(--sidebar-w)`. `body.sidebar-collapsed .content` has `margin-left: 56px`.
-3. **Settings panel**: Fixed position, slides from right (`right: -420px` → `right: 0`). Dark overlay behind.
-4. **Resizable columns**: `.resize-handle` is `position: absolute; right: 0; width: 5px; cursor: col-resize`. Purple highlight on hover/active.
-5. **Chart y-axis resize**: `.chart-y-resize-handle` positioned absolute at chart area left edge. Drag updates `yAxisLabelWidth` and re-truncates labels.
-6. **Section table**: `table-layout: fixed` with explicit column widths to prevent overflow.
-7. **Passed/Failed boxes**: `.passed-bg` and `.failed-bg` have `background: var(--card-bg) !important; border-left: 4px solid` color. Font size 28px for the values.
-8. **Responsive**: At ≤1100px: stats-row and detail-overview go single column. At ≤768px: sidebar hidden, no margin.
+2. **Sidebar brand link**: `.sidebar-brand-link` wraps logos and title in an `<a>` tag with `display:flex; flex-direction:column; text-decoration:none; color:inherit` so the whole brand area links to `/`.
+3. **Content margin**: `.content` has `margin-left: var(--sidebar-w)`. `body.sidebar-collapsed .content` has `margin-left: 56px`.
+4. **Page title row**: `.page-title-row` is `display:flex; justify-content:space-between` to place import/export buttons on the right side of the page title. `.page-title` has `margin-bottom:0` when inside this row.
+5. **Import/Export buttons**: `.io-btn` — inline-flex, border, subtle hover that turns purple. Used for both `<button>` (import) and `<a>` (export). `.io-btn:disabled` has `opacity:0.55`.
+6. **Import toast**: `.import-toast` is `position:fixed; top:20px; right:24px; z-index:9999`. `.toast-success` is green `#10b981`. `.toast-error` is red `#ef4444`.
+7. **Stat value colors**: `.stat-value.passed { color: #10b981; }` (green), `.stat-value.failed { color: #ef4444; }` (red). These replace the previous `color: var(--text)` for both classes.
+8. **Settings panel**: Fixed position, slides from right (`right: -420px` → `right: 0`). Dark overlay behind.
+9. **Resizable columns**: `.resize-handle` is `position: absolute; right: 0; width: 5px; cursor: col-resize`. Purple highlight on hover/active.
+10. **Chart y-axis resize**: `.chart-y-resize-handle` positioned absolute at chart area left edge. Drag updates `yAxisLabelWidth` and re-truncates labels.
+11. **Section table**: `table-layout: fixed` with explicit column widths to prevent overflow.
+12. **Passed/Failed boxes**: `.passed-bg` and `.failed-bg` have `background: var(--card-bg) !important; border-left: 4px solid` color. Font size 28px for the values.
+13. **Severity badges**: `.severity-badge` with 6 modifier classes — `critical` (#991b1b), `high` (#ef4444), `medium` (#f97316), `low` (#ca8a04 with `color:#000`), `informational` (#3b82f6), `manual` (#6b7280).
+14. **Requirement row enhancements**: `.req-clickable-row` (`cursor:pointer`, hover `#eef2ff`), `.req-title-cell` (bold), `.req-service` (muted), `.req-count-lg` (20px 800-weight numbers in passed/failed columns).
+15. **Resizable requirements table**: `.resizable-req-table` — `table-layout:auto` with drag handles on `th` elements.
+16. **Requirement detail panel**: `.req-detail-panel` — `position:fixed; right:0; width:500px; height:100vh; transform:translateX(100%); transition:transform .3s ease`. `.req-detail-panel.open { transform:translateX(0) }`. Panel is behind `.req-panel-overlay` (dim background) and z-index 201.
+17. **Panel drag handle**: `.req-panel-drag-handle` — `position:absolute; left:0; top:0; bottom:0; width:6px; cursor:col-resize`. JS listens for mousedown to resize panel width (min 350px, max viewport-40px).
+18. **Panel ID bracket**: `.req-panel-id-bracket` — purple, 15px, 700-weight text for the `[req_id]` display.
+19. **Resources table in panel**: `.req-resources-table` — compact 13px table. Status cells use `.res-pass` (green bg) or `.res-fail` (red bg) badges.
+20. **Responsive**: At ≤1100px: stats-row and detail-overview go single column. At ≤768px: sidebar hidden, no margin.
 
 ### 6.4 Full CSS Source
 
@@ -1231,6 +1805,7 @@ document.querySelectorAll('.section-row').forEach(row => {
     --red-light: #fee2e2;
     --yellow: #f59e0b;
     --yellow-light: #fef3c7;
+    /* 5-tier score colors */
     --score-dark-red: #991b1b;
     --score-red: #ef4444;
     --score-orange: #f97316;
@@ -1256,42 +1831,97 @@ body {
     border-right: 1px solid var(--border);
     padding: 20px 0;
     position: fixed;
-    top: 0; left: 0; bottom: 0;
+    top: 0;
+    left: 0;
+    bottom: 0;
     z-index: 100;
     display: flex;
     flex-direction: column;
     transition: width .25s ease, padding .25s ease;
     overflow: hidden;
 }
-.sidebar.collapsed { width: 56px; }
+
+.sidebar.collapsed {
+    width: 56px;
+}
 
 .sidebar-brand {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: 6px;
-    padding: 16px;
+    padding: 16px 16px 16px;
     border-bottom: 1px solid var(--border);
     overflow: hidden;
 }
+.sidebar-brand-link {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    text-decoration: none;
+    color: inherit;
+}
 
-.brand-logo { object-fit: contain; flex-shrink: 0; border-radius: 6px; }
-.brand-logo-full { height: 126px; margin-left: -0.5cm; }
-.brand-logo-icon { display: none; height: 36px; width: 36px; margin-left: 0; }
-.sidebar.collapsed .brand-logo-full { display: none; }
-.sidebar.collapsed .brand-logo-icon { display: block; }
+.brand-logo {
+    object-fit: contain;
+    flex-shrink: 0;
+    border-radius: 6px;
+}
+
+.brand-logo-full {
+    height: 126px;
+    margin-left: -0.5cm;
+}
+
+.brand-logo-icon {
+    display: none;
+    height: 36px;
+    width: 36px;
+    margin-left: 0;
+}
+
+.sidebar.collapsed .brand-logo-full {
+    display: none;
+}
+
+.sidebar.collapsed .brand-logo-icon {
+    display: block;
+}
+
+.brand-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.brand-name {
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--text);
+    line-height: 1.2;
+    letter-spacing: 1px;
+}
 
 .brand-title {
-    font-size: 20px;
-    font-weight: 700;
+    font-size: 30px;
+    font-weight: 500;
     color: var(--text);
     line-height: 1.3;
     text-align: left;
     white-space: nowrap;
+    margin-top: -30px;
 }
+
 .sidebar.collapsed .brand-text,
-.sidebar.collapsed .brand-title { display: none; }
-.sidebar.collapsed .sidebar-brand { padding: 10px 8px 12px; align-items: center; }
+.sidebar.collapsed .brand-title {
+    display: none;
+}
+
+.sidebar.collapsed .sidebar-brand {
+    padding: 10px 8px 12px;
+    align-items: center;
+}
 
 /* Region checkbox group */
 .region-checkbox-group {
@@ -1305,169 +1935,565 @@ body {
     flex-direction: column;
     gap: 2px;
 }
+
 .region-cb {
-    display: flex; align-items: center; gap: 8px;
-    font-size: 13px; color: var(--text);
-    padding: 4px 6px; border-radius: 4px; cursor: pointer;
-    text-transform: none; font-weight: 400; letter-spacing: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text);
+    padding: 4px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    text-transform: none;
+    font-weight: 400;
+    letter-spacing: 0;
 }
-.region-cb:hover { background: var(--purple-light); }
-.region-cb input[type="checkbox"] { accent-color: var(--purple); width: 16px; height: 16px; cursor: pointer; }
 
-.sidebar-toggle { display: none; }
+.region-cb:hover {
+    background: var(--purple-light);
+}
 
-.sidebar-nav { list-style: none; padding: 12px 10px; flex: 1; }
+.region-cb input[type="checkbox"] {
+    accent-color: var(--purple);
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+}
+
+.sidebar-toggle {
+    display: none;
+}
+
+.sidebar-nav {
+    list-style: none;
+    padding: 12px 10px;
+    flex: 1;
+}
+
 .sidebar-nav li a {
-    display: flex; align-items: center; gap: 10px;
-    padding: 10px 14px; border-radius: 8px;
-    text-decoration: none; color: var(--text-muted);
-    font-size: 14px; font-weight: 500;
-    transition: all .15s; white-space: nowrap; overflow: hidden;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 500;
+    transition: all .15s;
+    white-space: nowrap;
+    overflow: hidden;
 }
-.sidebar.collapsed .sidebar-nav li a span { display: none; }
-.sidebar.collapsed .sidebar-nav li a { justify-content: center; padding: 10px 8px; }
-.sidebar-nav li a:hover, .sidebar-nav li a.active { background: var(--purple-light); color: var(--purple); }
+
+.sidebar.collapsed .sidebar-nav li a span {
+    display: none;
+}
+
+.sidebar.collapsed .sidebar-nav li a {
+    justify-content: center;
+    padding: 10px 8px;
+}
+
+.sidebar-nav li a:hover,
+.sidebar-nav li a.active {
+    background: var(--purple-light);
+    color: var(--purple);
+}
 
 /* Sidebar bottom settings */
-.sidebar-bottom { padding: 10px; border-top: 1px solid var(--border); }
-.settings-btn {
-    display: flex; align-items: center; gap: 10px;
-    padding: 10px 14px; border-radius: 8px; cursor: pointer;
-    color: var(--text-muted); font-size: 14px; font-weight: 500;
-    transition: all .15s; white-space: nowrap; overflow: hidden;
-    background: none; border: none; width: 100%; text-align: left;
+.sidebar-bottom {
+    padding: 10px;
+    border-top: 1px solid var(--border);
 }
-.settings-btn:hover { background: var(--purple-light); color: var(--purple); }
-.settings-btn img { width: 20px; height: 20px; object-fit: contain; flex-shrink: 0; }
-.sidebar.collapsed .settings-btn span { display: none; }
-.sidebar.collapsed .settings-btn { justify-content: center; padding: 10px 8px; }
+
+.settings-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 500;
+    transition: all .15s;
+    white-space: nowrap;
+    overflow: hidden;
+    background: none;
+    border: none;
+    width: 100%;
+    text-align: left;
+}
+
+.settings-btn:hover {
+    background: var(--purple-light);
+    color: var(--purple);
+}
+
+.settings-btn img {
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    flex-shrink: 0;
+}
+
+.sidebar.collapsed .settings-btn span {
+    display: none;
+}
+
+.sidebar.collapsed .settings-btn {
+    justify-content: center;
+    padding: 10px 8px;
+}
 
 /* Settings Panel (slide-over) */
-.settings-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.3); z-index: 200; }
-.settings-overlay.open { display: block; }
+.settings-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.3);
+    z-index: 200;
+}
+
+.settings-overlay.open {
+    display: block;
+}
+
 .settings-panel {
-    position: fixed; top: 0; right: -420px; width: 400px; height: 100vh;
-    background: var(--card-bg); box-shadow: -4px 0 20px rgba(0,0,0,.1);
-    z-index: 201; display: flex; flex-direction: column;
-    transition: right .3s ease; overflow-y: auto;
+    position: fixed;
+    top: 0;
+    right: -420px;
+    width: 400px;
+    height: 100vh;
+    background: var(--card-bg);
+    box-shadow: -4px 0 20px rgba(0,0,0,.1);
+    z-index: 201;
+    display: flex;
+    flex-direction: column;
+    transition: right .3s ease;
+    overflow-y: auto;
 }
-.settings-panel.open { right: 0; }
+
+.settings-panel.open {
+    right: 0;
+}
+
 .settings-panel-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 20px 24px; border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
 }
-.settings-panel-header h2 { font-size: 18px; font-weight: 700; }
+
+.settings-panel-header h2 {
+    font-size: 18px;
+    font-weight: 700;
+}
+
 .settings-close {
-    background: none; border: none; cursor: pointer;
-    color: var(--text-muted); padding: 4px; border-radius: 6px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    padding: 4px;
+    border-radius: 6px;
 }
-.settings-close:hover { background: var(--bg); color: var(--text); }
-.settings-panel-body { padding: 24px; display: flex; flex-direction: column; gap: 20px; }
-.settings-section { display: flex; flex-direction: column; gap: 6px; }
+
+.settings-close:hover {
+    background: var(--bg);
+    color: var(--text);
+}
+
+.settings-panel-body {
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.settings-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
 .settings-section label {
-    font-size: 13px; font-weight: 600; color: var(--text-muted);
-    text-transform: uppercase; letter-spacing: .3px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: .3px;
 }
-.settings-section input, .settings-section select {
-    border: 1px solid var(--border); border-radius: 8px;
-    padding: 10px 14px; font-size: 14px; color: var(--text);
-    background: var(--bg); outline: none; width: 100%;
+
+.settings-section input,
+.settings-section select {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 14px;
+    color: var(--text);
+    background: var(--bg);
+    outline: none;
+    width: 100%;
 }
-.settings-section input:focus, .settings-section select:focus {
-    border-color: var(--purple); box-shadow: 0 0 0 3px rgba(124,58,237,.1);
+
+.settings-section input:focus,
+.settings-section select:focus {
+    border-color: var(--purple);
+    box-shadow: 0 0 0 3px rgba(124,58,237,.1);
 }
-.settings-section input[type="password"] { font-family: monospace; letter-spacing: 1px; }
-.settings-section .hint { font-size: 11px; color: var(--text-muted); }
-.settings-actions { padding: 16px 24px; border-top: 1px solid var(--border); display: flex; gap: 10px; }
+
+.settings-section input[type="password"] {
+    font-family: monospace;
+    letter-spacing: 1px;
+}
+
+.settings-section .hint {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.settings-actions {
+    padding: 16px 24px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 10px;
+}
+
 .btn-primary {
-    background: var(--purple); color: #fff; border: none; border-radius: 8px;
-    padding: 10px 24px; font-size: 14px; font-weight: 600; cursor: pointer;
+    background: var(--purple);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
     transition: background .15s;
 }
-.btn-primary:hover { background: #6d28d9; }
-.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-secondary {
-    background: var(--bg); color: var(--text); border: 1px solid var(--border);
-    border-radius: 8px; padding: 10px 24px; font-size: 14px; font-weight: 600;
-    cursor: pointer; transition: background .15s;
+
+.btn-primary:hover {
+    background: #6d28d9;
 }
-.btn-secondary:hover { background: #e2e8f0; }
+
+.btn-secondary {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s;
+}
+
+.btn-secondary:hover {
+    background: #e2e8f0;
+}
+
+.region-select {
+    max-height: 200px;
+}
 
 /* ===== Content ===== */
 .content {
-    margin-left: var(--sidebar-w); padding: 28px 32px;
-    flex: 1; min-width: 0; transition: margin-left .25s ease;
+    margin-left: var(--sidebar-w);
+    padding: 28px 32px;
+    flex: 1;
+    min-width: 0;
+    transition: margin-left .25s ease;
 }
-body.sidebar-collapsed .content { margin-left: 56px; }
-.page-title { font-size: 24px; font-weight: 700; margin-bottom: 20px; color: var(--text); }
+
+body.sidebar-collapsed .content {
+    margin-left: 56px;
+}
+
+.page-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 20px;
+}
+
+.page-title {
+    font-size: 24px;
+    font-weight: 700;
+    margin-bottom: 0;
+    color: var(--text);
+}
+
+.page-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.io-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 16px;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--text);
+    text-decoration: none;
+    transition: background .15s, border-color .15s;
+    white-space: nowrap;
+}
+
+.io-btn:hover:not(:disabled) {
+    background: var(--bg);
+    border-color: var(--purple);
+    color: var(--purple);
+}
+
+.io-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+/* Import toast */
+.import-toast {
+    position: fixed;
+    top: 20px;
+    right: 24px;
+    z-index: 9999;
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    box-shadow: 0 4px 16px rgba(0,0,0,.2);
+    max-width: 380px;
+}
+
+.toast-success {
+    background: #10b981;
+    color: #fff;
+}
+
+.toast-error {
+    background: #ef4444;
+    color: #fff;
+}
 
 /* ===== Cards ===== */
 .card {
-    background: var(--card-bg); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 18px 22px; box-shadow: var(--shadow);
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 22px;
+    box-shadow: var(--shadow);
 }
+
 .card-header {
-    display: flex; align-items: center; gap: 6px;
-    font-size: 13px; font-weight: 600; color: var(--text-muted);
-    margin-bottom: 12px; text-transform: uppercase; letter-spacing: .3px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+    text-transform: uppercase;
+    letter-spacing: .3px;
 }
-.info-icon { cursor: help; font-size: 14px; color: var(--text-muted); }
+
+.info-icon {
+    cursor: help;
+    font-size: 14px;
+    color: var(--text-muted);
+}
 
 /* ===== Stats Row ===== */
 .stats-row {
-    display: grid; grid-template-columns: 220px 180px 1fr;
-    align-items: stretch; gap: 16px; margin-bottom: 28px;
+    display: grid;
+    grid-template-columns: 220px 180px 1fr;
+    grid-template-rows: auto;
+    align-items: stretch;
+    gap: 16px;
+    margin-bottom: 28px;
 }
-.stat-stack { display: flex; flex-direction: column; gap: 16px; }
-.gauge-card { display: flex; flex-direction: column; align-items: center; }
+
+.stat-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.gauge-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
 .gauge-wrapper {
-    position: relative; width: 200px; height: 120px;
-    display: flex; align-items: flex-end; justify-content: center;
+    position: relative;
+    width: 200px;
+    height: 120px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
 }
-.gauge-value { position: absolute; bottom: 0; font-size: 28px; font-weight: 800; color: var(--text); }
-.stat-card { display: flex; flex-direction: column; justify-content: flex-start; }
-.stat-value { font-size: 32px; font-weight: 800; }
-.stat-value.passed { color: var(--text); }
-.stat-value.failed { color: var(--text); }
-.wide-card { min-width: 0; }
-.chart-card { min-height: 180px; }
+
+.gauge-value {
+    position: absolute;
+    bottom: 0;
+    font-size: 28px;
+    font-weight: 800;
+    color: var(--text);
+}
+
+.stat-card {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+}
+
+.stat-value {
+    font-size: 32px;
+    font-weight: 800;
+}
+
+.stat-value.passed { color: #10b981; }
+.stat-value.failed { color: #ef4444; }
+
+.wide-card {
+    min-width: 0;
+}
+
+.chart-card {
+    min-height: 180px;
+}
 
 /* ===== Table Section ===== */
 .table-section {
-    background: var(--card-bg); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 20px 24px;
-    box-shadow: var(--shadow); overflow-x: auto;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    box-shadow: var(--shadow);
+    overflow-x: auto;
 }
-.table-header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-.section-title { font-size: 17px; font-weight: 700; }
-.item-count { font-size: 13px; color: var(--text-muted); }
-.table-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
-.filter-group { display: inline-flex; align-items: center; gap: 6px; }
+
+.table-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+
+.section-title {
+    font-size: 17px;
+    font-weight: 700;
+}
+
+.item-count {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.table-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+
+.filter-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .filter-group label {
-    font-size: 12px; font-weight: 600; color: var(--text-muted);
-    text-transform: uppercase; letter-spacing: .3px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: .3px;
 }
+
 .filter-select {
-    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
-    font-size: 13px; color: var(--text); background: var(--bg); outline: none; cursor: pointer;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--bg);
+    outline: none;
+    cursor: pointer;
 }
-.filter-select:focus { border-color: var(--purple); }
-.active-filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+
+.filter-select:focus {
+    border-color: var(--purple);
+}
+
+.active-filters {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+
 .filter-tag {
-    display: inline-flex; align-items: center; gap: 4px;
-    padding: 3px 10px; background: var(--purple-light); color: var(--purple);
-    border-radius: 16px; font-size: 12px; font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 10px;
+    background: var(--purple-light);
+    color: var(--purple);
+    border-radius: 16px;
+    font-size: 12px;
+    font-weight: 600;
 }
-.filter-tag button { background: none; border: none; color: var(--purple); cursor: pointer; font-size: 14px; padding: 0 2px; }
+
+.filter-tag button {
+    background: none;
+    border: none;
+    color: var(--purple);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0 2px;
+}
+
 .search-box {
-    display: inline-flex; align-items: center; gap: 8px;
-    border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; background: var(--bg);
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 12px;
+    background: var(--bg);
 }
-.search-box input { border: none; outline: none; background: transparent; font-size: 13px; color: var(--text); width: 220px; }
+
+.search-box input {
+    border: none;
+    outline: none;
+    background: transparent;
+    font-size: 13px;
+    color: var(--text);
+    width: 220px;
+}
 
 /* ===== Data Table ===== */
-.data-table { width: 100%; border-collapse: collapse; table-layout: auto; }
-.section-table { table-layout: fixed; }
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: auto;
+}
+
+.section-table {
+    table-layout: fixed;
+}
+
 .section-table th:nth-child(1) { width: 30px; }
 .section-table th:nth-child(2) { width: 35%; }
 .section-table th:nth-child(3) { width: 25%; }
@@ -1476,140 +2502,712 @@ body.sidebar-collapsed .content { margin-left: 56px; }
 .section-table th:nth-child(6) { width: 12%; }
 
 .data-table th {
-    text-align: left; padding: 10px 12px; font-size: 12px; font-weight: 600;
-    color: var(--text-muted); text-transform: uppercase; letter-spacing: .3px;
-    border-bottom: 2px solid var(--border); white-space: nowrap;
-    position: relative; overflow: hidden;
+    text-align: left;
+    padding: 10px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+    position: relative;
+    overflow: hidden;
 }
 
 /* Resizable column handle */
 .data-table th .resize-handle {
-    position: absolute; right: 0; top: 0; bottom: 0;
-    width: 5px; cursor: col-resize; background: transparent; z-index: 1;
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 5px;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 1;
 }
-.data-table th .resize-handle:hover, .data-table th .resize-handle.active { background: var(--purple); opacity: 0.4; }
-.data-table.resizing { cursor: col-resize; user-select: none; }
+
+.data-table th .resize-handle:hover,
+.data-table th .resize-handle.active {
+    background: var(--purple);
+    opacity: 0.4;
+}
+
+.data-table.resizing {
+    cursor: col-resize;
+    user-select: none;
+}
 
 /* Chart y-axis resize handle */
-.chart-resizable-wrapper { overflow: hidden; }
-.chart-y-resize-handle {
-    position: absolute; top: 0; bottom: 0; width: 6px; left: 0;
-    cursor: col-resize; background: transparent; z-index: 5; transition: background .15s;
+.chart-resizable-wrapper {
+    overflow: hidden;
 }
-.chart-y-resize-handle:hover, .chart-y-resize-handle.active { background: var(--purple); opacity: 0.4; border-radius: 2px; }
-.chart-resizing { cursor: col-resize; user-select: none; }
+.chart-y-resize-handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    left: 0;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 5;
+    transition: background .15s;
+}
+.chart-y-resize-handle:hover,
+.chart-y-resize-handle.active {
+    background: var(--purple);
+    opacity: 0.4;
+    border-radius: 2px;
+}
+.chart-resizing {
+    cursor: col-resize;
+    user-select: none;
+}
 
 .data-table td {
-    padding: 12px; font-size: 13px; border-bottom: 1px solid var(--border);
-    vertical-align: middle; overflow: hidden; text-overflow: ellipsis;
+    padding: 12px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
-.data-table tbody tr:hover { background: #f1f5f9; }
-.clickable-row { cursor: pointer; transition: background .1s; }
 
-.fw-name { display: flex; align-items: center; gap: 10px; font-weight: 600; white-space: nowrap; }
-.fw-badge, .fw-badge-lg {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 28px; height: 28px; border-radius: 6px;
-    font-size: 9px; font-weight: 800; color: #fff; letter-spacing: .5px; flex-shrink: 0;
+.data-table tbody tr:hover {
+    background: #f1f5f9;
 }
-.fw-badge-lg { width: 36px; height: 36px; font-size: 11px; border-radius: 8px; }
+
+.clickable-row {
+    cursor: pointer;
+    transition: background .1s;
+}
+
+.fw-name {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.fw-badge, .fw-badge-lg {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    font-size: 9px;
+    font-weight: 800;
+    color: #fff;
+    letter-spacing: .5px;
+    flex-shrink: 0;
+}
+
+.fw-badge-lg {
+    width: 36px;
+    height: 36px;
+    font-size: 11px;
+    border-radius: 8px;
+}
 
 /* Logo badges */
 .fw-logo {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 30px; height: 30px; border-radius: 6px; flex-shrink: 0; overflow: hidden; padding: 3px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    overflow: hidden;
+    padding: 3px;
 }
-.fw-logo img { max-width: 100%; max-height: 100%; object-fit: contain; }
-.logo-bg-dark { background: #1a1a2e; }
-.logo-bg-white { background: #ffffff; border: 1px solid var(--border); }
+
+.fw-logo img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.logo-bg-dark {
+    background: #1a1a2e;
+}
+
+.logo-bg-white {
+    background: #ffffff;
+    border: 1px solid var(--border);
+}
 
 .fw-logo-lg {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 38px; height: 38px; border-radius: 8px; flex-shrink: 0; overflow: hidden; padding: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 8px;
+    flex-shrink: 0;
+    overflow: hidden;
+    padding: 4px;
 }
-.fw-logo-lg img { max-width: 100%; max-height: 100%; object-fit: contain; }
-.fw-logo-lg.logo-bg-dark { background: #1a1a2e; }
-.fw-logo-lg.logo-bg-white { background: #ffffff; border: 1px solid var(--border); }
 
-.fw-desc { color: var(--text-muted); max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.failed-link { color: var(--red); font-weight: 600; text-decoration: underline; }
+.fw-logo-lg img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.fw-logo-lg.logo-bg-dark {
+    background: #1a1a2e;
+}
+
+.fw-logo-lg.logo-bg-white {
+    background: #ffffff;
+    border: 1px solid var(--border);
+}
+
+.fw-desc {
+    color: var(--text-muted);
+    max-width: 260px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.failed-link {
+    color: var(--red);
+    font-weight: 600;
+    text-decoration: underline;
+}
 
 /* ===== Score Bars ===== */
-.score-cell { display: flex; align-items: center; gap: 10px; }
-.score-pct { font-weight: 700; font-size: 13px; min-width: 52px; }
-.score-bar { flex: 1; height: 10px; background: #e2e8f0; border-radius: 5px; min-width: 60px; overflow: hidden; }
-.detail-bar { min-width: 80px; }
-.mini-bar { min-width: 60px; height: 6px; }
-.score-bar-fill { height: 100%; border-radius: 5px; transition: width .4s ease; }
+.score-cell {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.score-pct {
+    font-weight: 700;
+    font-size: 13px;
+    min-width: 52px;
+}
+
+.score-bar {
+    flex: 1;
+    height: 10px;
+    background: #e2e8f0;
+    border-radius: 5px;
+    min-width: 60px;
+    overflow: hidden;
+}
+
+.detail-bar {
+    min-width: 80px;
+}
+
+.mini-bar {
+    min-width: 60px;
+    height: 6px;
+}
+
+.score-bar-fill {
+    height: 100%;
+    border-radius: 5px;
+    transition: width .4s ease;
+}
+
 .score-bar-fill.score-dark-red { background: var(--score-dark-red); }
 .score-bar-fill.score-red { background: var(--score-red); }
 .score-bar-fill.score-orange { background: var(--score-orange); }
 .score-bar-fill.score-yellow { background: var(--score-yellow); }
 .score-bar-fill.score-green { background: var(--score-green); }
+.score-bar-fill.green { background: var(--score-green); }
+.score-bar-fill.yellow { background: var(--score-yellow); }
+.score-bar-fill.red { background: var(--score-red); }
 .score-bar-fill.gray { background: #cbd5e1; }
-.score-pct-sm { font-weight: 600; font-size: 12px; min-width: 42px; }
+
+.score-pct-sm {
+    font-weight: 600;
+    font-size: 12px;
+    min-width: 42px;
+}
 
 /* ===== Detail Page ===== */
-.detail-header { margin-bottom: 20px; }
-.back-link {
-    display: inline-flex; align-items: center; gap: 6px;
-    color: var(--purple); text-decoration: none; font-size: 13px; font-weight: 600; margin-bottom: 12px;
+.detail-header {
+    margin-bottom: 20px;
 }
-.back-link:hover { text-decoration: underline; }
-.detail-title { display: flex; align-items: center; gap: 12px; }
-.detail-overview { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 28px; }
-.detail-score-card { display: flex; align-items: center; gap: 28px; }
-.donut-wrapper { position: relative; width: 220px; height: 220px; flex-shrink: 0; }
-.donut-center { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; }
-.donut-pct { display: block; font-size: 36px; font-weight: 800; color: var(--text); line-height: 1.1; }
-.donut-label { display: block; font-size: 13px; color: var(--text-muted); font-weight: 500; }
-.detail-stats { display: flex; flex-direction: column; gap: 20px; }
-.detail-stat { display: flex; align-items: center; gap: 12px; }
-.detail-stat-value { font-size: 22px; font-weight: 800; }
-.detail-stat-label { font-size: 13px; color: var(--text-muted); }
-.detail-summary-card { display: flex; flex-direction: column; justify-content: space-between; }
-.detail-summary-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
-.summary-item { padding: 10px 14px; background: var(--bg); border-radius: 8px; }
-.summary-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; letter-spacing: .3px; margin-bottom: 4px; }
-.summary-value { font-size: 15px; font-weight: 700; }
 
-.passed-bg { background: var(--card-bg) !important; border-left: 4px solid var(--green); }
-.failed-bg { background: var(--card-bg) !important; border-left: 4px solid var(--red); }
+.back-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--purple);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 12px;
+}
+
+.back-link:hover { text-decoration: underline; }
+
+.detail-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.detail-overview {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 28px;
+}
+
+.detail-score-card {
+    display: flex;
+    align-items: center;
+    gap: 28px;
+}
+
+.donut-wrapper {
+    position: relative;
+    width: 220px;
+    height: 220px;
+    flex-shrink: 0;
+}
+
+.donut-center {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+}
+
+.donut-pct {
+    display: block;
+    font-size: 36px;
+    font-weight: 800;
+    color: var(--text);
+    line-height: 1.1;
+}
+
+.donut-label {
+    display: block;
+    font-size: 13px;
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.detail-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.detail-stat {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.detail-stat-value {
+    font-size: 22px;
+    font-weight: 800;
+}
+
+.detail-stat-label {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.detail-summary-card {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+
+.detail-summary-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.summary-item {
+    padding: 10px 14px;
+    background: var(--bg);
+    border-radius: 8px;
+}
+
+.summary-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: .3px;
+    margin-bottom: 4px;
+}
+
+.summary-value {
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.passed-bg {
+    background: var(--card-bg) !important;
+    border-left: 4px solid var(--green);
+}
+.failed-bg {
+    background: var(--card-bg) !important;
+    border-left: 4px solid var(--red);
+}
 .text-green { color: var(--green); }
 .text-red { color: var(--red); }
+
 .summary-item.passed-bg .summary-value,
-.summary-item.failed-bg .summary-value { font-size: 28px; font-weight: 800; }
-.score-breakdown-chart { height: 60px; }
+.summary-item.failed-bg .summary-value {
+    font-size: 28px;
+    font-weight: 800;
+}
+
+.score-breakdown-chart {
+    height: 60px;
+}
 
 /* ===== Expandable Sections ===== */
-.section-row { cursor: pointer; transition: background .1s; }
-.section-row:hover { background: #f1f5f9; }
-.expand-icon { width: 30px; text-align: center; }
-.chevron { transition: transform .2s; }
-.chevron.rotated { transform: rotate(90deg); }
-.sec-name { font-weight: 600; }
-.requirements-row { background: #fafbfd; }
-.requirements-row.hidden { display: none; }
-.requirements-container { padding: 8px 16px 12px 40px; }
-.requirements-table { width: 100%; border-collapse: collapse; }
-.requirements-table th {
-    text-align: left; padding: 6px 10px; font-size: 11px; font-weight: 600;
-    color: var(--text-muted); text-transform: uppercase; border-bottom: 1px solid var(--border);
+.section-row {
+    cursor: pointer;
+    transition: background .1s;
 }
-.requirements-table td { padding: 8px 10px; font-size: 12px; border-bottom: 1px solid #f1f5f9; }
-.req-id { font-weight: 700; color: var(--purple); white-space: nowrap; }
-.req-desc { color: var(--text-muted); max-width: 400px; }
+
+.section-row:hover {
+    background: #f1f5f9;
+}
+
+.expand-icon {
+    width: 30px;
+    text-align: center;
+}
+
+.chevron {
+    transition: transform .2s;
+}
+
+.chevron.rotated {
+    transform: rotate(90deg);
+}
+
+.sec-name {
+    font-weight: 600;
+}
+
+.requirements-row {
+    background: #fafbfd;
+}
+
+.requirements-row.hidden {
+    display: none;
+}
+
+.requirements-container {
+    padding: 8px 16px 12px 40px;
+}
+
+.requirements-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.requirements-table th {
+    text-align: left;
+    padding: 6px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+}
+
+.requirements-table td {
+    padding: 8px 10px;
+    font-size: 12px;
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.req-id {
+    font-weight: 700;
+    color: var(--purple);
+    white-space: nowrap;
+}
+
+.req-desc {
+    color: var(--text-muted);
+    max-width: 400px;
+}
+
+/* ===== Severity Badges ===== */
+.severity-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: capitalize;
+    white-space: nowrap;
+    letter-spacing: .3px;
+}
+.severity-informational { background: #3b82f6; color: #fff; }
+.severity-critical { background: #991b1b; color: #fff; }
+.severity-high { background: #ef4444; color: #fff; }
+.severity-medium { background: #f97316; color: #fff; }
+.severity-low { background: #ca8a04; color: #000; }
+.severity-manual { background: #6b7280; color: #fff; }
+
+/* ===== Requirement Table Enhancements ===== */
+.req-clickable-row {
+    cursor: pointer;
+    transition: background .1s;
+}
+.req-clickable-row:hover {
+    background: #eef2ff;
+}
+.req-title-cell {
+    font-weight: 600;
+    font-size: 12px;
+    color: var(--text);
+}
+.req-service {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.req-count-lg {
+    font-size: 20px;
+    font-weight: 800;
+}
+
+/* Resizable requirements table */
+.resizable-req-table {
+    table-layout: auto;
+}
+.resizable-req-table.resizing {
+    cursor: col-resize;
+    user-select: none;
+}
+.resizable-req-table th {
+    position: relative;
+    overflow: hidden;
+}
+.resizable-req-table th .resize-handle {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 5px;
+    cursor: col-resize;
+    background: transparent;
+    z-index: 1;
+}
+.resizable-req-table th .resize-handle:hover,
+.resizable-req-table th .resize-handle.active {
+    background: var(--purple);
+    opacity: 0.4;
+}
+
+/* ===== Requirement Detail Panel ===== */
+.req-panel-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.3);
+    z-index: 200;
+}
+.req-panel-overlay.open {
+    display: block;
+}
+.req-detail-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 500px;
+    height: 100vh;
+    background: var(--card-bg);
+    box-shadow: -4px 0 20px rgba(0,0,0,.1);
+    z-index: 201;
+    display: flex;
+    flex-direction: column;
+    transition: transform .3s ease;
+    overflow-y: auto;
+    transform: translateX(100%);
+}
+.req-detail-panel.open {
+    transform: translateX(0);
+}
+.req-panel-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--border);
+    gap: 12px;
+}
+.req-panel-title-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+}
+.req-panel-id-bracket {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--purple);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.req-panel-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    word-break: break-word;
+}
+.req-panel-close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-muted);
+    padding: 4px;
+    border-radius: 6px;
+    flex-shrink: 0;
+}
+.req-panel-close:hover {
+    background: var(--bg);
+    color: var(--text);
+}
+.req-panel-body {
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+.req-panel-section h4 {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: .3px;
+    margin-bottom: 8px;
+}
+.req-panel-section p,
+.req-panel-section div {
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.6;
+}
+/* Panel markdown rendering */
+.req-panel-section code {
+    background: #f1f5f9;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 13px;
+    color: #c026d3;
+}
+
+/* Resources table in panel */
+.req-resources-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin-top: 4px;
+}
+.req-resources-table th {
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+}
+.req-resources-table td {
+    padding: 5px 8px;
+    border-bottom: 1px solid #f1f5f9;
+}
+.res-name {
+    color: var(--text);
+    word-break: break-all;
+    max-width: 320px;
+}
+.res-region {
+    color: var(--text-muted);
+    font-size: 12px;
+    white-space: nowrap;
+}
+.res-service {
+    color: var(--text);
+    font-size: 12px;
+    white-space: nowrap;
+}
+.res-status {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.res-pass {
+    background: #d1fae5;
+    color: #065f46;
+}
+.res-fail {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+/* Panel drag handle */
+.req-panel-drag-handle {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    cursor: col-resize;
+    z-index: 2;
+    background: transparent;
+    transition: background .15s;
+}
+.req-panel-drag-handle:hover {
+    background: var(--purple);
+    opacity: 0.3;
+}
+.req-panel-section a {
+    color: var(--purple);
+    text-decoration: none;
+    font-size: 13px;
+    word-break: break-all;
+}
+.req-panel-section a:hover {
+    text-decoration: underline;
+}
 
 /* ===== Responsive ===== */
 @media (max-width: 1100px) {
-    .stats-row { grid-template-columns: 1fr; }
-    .detail-overview { grid-template-columns: 1fr; }
+    .stats-row {
+        grid-template-columns: 1fr;
+    }
+    .detail-overview {
+        grid-template-columns: 1fr;
+    }
 }
+
 @media (max-width: 768px) {
     .sidebar { display: none; }
     .content { margin-left: 0; padding: 16px; }
     .stats-row { grid-template-columns: 1fr; }
 }
+
 ```
 
 ---
@@ -1647,22 +3245,26 @@ cd compliance-dashboard
 python app.py
 # Opens at http://localhost:5000
 
-# For production (optional): use gunicorn + nginx with SSL
+# For production: use gunicorn + nginx with SSL
 pip install gunicorn
 gunicorn -w 4 -b 127.0.0.1:5000 app:app
 ```
 
 Required: **Flask 3.0+**, **Python 3.10+**
 
+**nginx note (required for ZIP import feature):** Add `client_max_body_size 500m;` inside the `server` block of your nginx site config. Without this, large ZIP uploads return HTTP 413 before Flask even receives the request. Flask itself also has `app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024` set; both limits must be raised.
+
 ---
 
 ## 9. Setup Instructions for GenAI
 
 1. **Copy logo files** from `images_logo/` into `static/logos/` (exclude the two screenshot PNGs).
-2. **Create the 4 files**: `app.py`, `templates/base.html`, `templates/dashboard.html`, `templates/detail.html`, `static/css/style.css` — all source code is provided verbatim above.
-3. **Point `COMPLIANCE_DIR`** to where your Prowler compliance CSVs live (semicolon-delimited).
-4. **Run** `python app.py`.
-5. **Match the screenshots**: Compare your output against `images_logo/main_dashboard.png` and `images_logo/detailed_compliance_CIS_AWSv3.png`.
+2. **Create the 5 files**: `app.py`, `templates/base.html`, `templates/dashboard.html`, `templates/detail.html`, `static/css/style.css` — all source code is provided verbatim above.
+3. **Create `service_names.csv`** in the `compliance-dashboard/` directory using the content provided in section 2.5. This maps raw Prowler `SERVICE_NAME` values to human-readable display names.
+4. **Point `COMPLIANCE_DIR`** to where your Prowler compliance CSVs live (semicolon-delimited). Verify `PROWLER_OUTPUT_DIR` points to the parent `prowler/output/` folder (one level up from `compliance/`) so the main `prowler-output-*.csv` can be found.
+5. **Run** `python app.py`.
+6. **For production nginx**: add `client_max_body_size 500m;` to your nginx server block (see Section 8 for details).
+7. **Match the screenshots**: Compare your output against `images_logo/main_dashboard.png` and `images_logo/detailed_compliance_CIS_AWSv3.png`.
 
 ---
 
@@ -1675,6 +3277,14 @@ Required: **Flask 3.0+**, **Python 3.10+**
 - **Resizable table columns** — drag handles on every column header.
 - **Chart y-axis drag resize** — handle positioned at chart area left edge.
 - **Passed/Failed detail boxes** — white background with colored left border (green for passed, red for failed), large 28px numbers.
-- **Framework logos** — AWS-branded frameworks get dark background; all others get white background with subtle border.
-- **Company branding** — `gapv.webp` shown full-size when sidebar is open (126px tall), `icon_gapv.webp` (36×36) when collapsed. Title text "CloudGuard".
+- **Framework logos** — AWS-branded frameworks get dark background (`#1a1a2e`); all others get white background with subtle border.
+- **Company branding** — `gapv.webp` shown full-size when sidebar is open (126px tall), `icon_gapv.webp` (36×36) when collapsed. Title text "Cloud Guard" (two words). The entire brand area (`sidebar-brand-link`) is an `<a href="/">` link.
+- **Favicon** — `static/logos/icon_gapv.webp` linked in `<head>` via `<link rel="icon" type="image/webp">`.
+- **Colored stat numbers** — Passed count is green (`#10b981`), Failed count is red (`#ef4444`) in the dashboard stat cards.
+- **Import/Export ZIP** — Dashboard has an Import button (triggers `POST /import` with ZIP validation, folder-prefix stripping, path-traversal protection) and an Export link (`GET /export` streams a ZIP). Both at top-right of page title row via `.page-title-row` / `.io-btn`. nginx must have `client_max_body_size 500m` and Flask must have `MAX_CONTENT_LENGTH = 500MB`.
+- **Service name display mapping** — `service_names.csv` maps raw Prowler `SERVICE_NAME` values to display names. Loaded at startup into `SERVICE_NAME_MAP`. Used in requirement detail panel and requirements table.
+- **Severity badges** — 6 levels with distinct background colors (critical=dark red, high=red, medium=orange, low=amber with black text, informational=blue, manual=gray). "Manual" severity is assigned when all check_ids for a requirement have no real findings (all-manual checks).
+- **Requirement detail panel** — Right-side slide-over panel, 500px default width, draggable to resize (min 350px, max viewport-40px). Shows `[req_id]` bracket + severity badge in header, then Description / Risk / Remediation / Resources sections. `transform: translateX(100%)` → `translateX(0)` transition.
+- **Resources table** — Lists individual resources found for a requirement (Resource name, Region, Service display name, PASS/FAIL status badge). Populated from the main `prowler-output-*.csv` via `_parse_main_prowler_csv()`.
+- **Markdown renderer** — `md()` JS function in `detail.html` converts bold (`**text**`), inline code (`` `code` ``), and URLs to HTML for the description/risk/remediation fields.
 - **Settings panel** — slide-over from right with AWS credentials + multi-select region checkboxes (UI only, scan not implemented).

@@ -28,9 +28,9 @@
             </a></li>
         </ul>
         <div class="sidebar-bottom">
-            <button class="settings-btn" id="settingsBtn" title="Settings">
-                <img src="{{ url_for('static', filename='logos/setting.png') }}" alt="Settings">
-                <span>Settings</span>
+            <button class="settings-btn" id="settingsBtn" title="Run Scan">
+                <img src="{{ url_for('static', filename='logos/setting.png') }}" alt="Run Scan">
+                <span>Run Scan</span>
             </button>
         </div>
     </nav>
@@ -39,51 +39,121 @@
     <div class="settings-overlay" id="settingsOverlay"></div>
     <div class="settings-panel" id="settingsPanel">
         <div class="settings-panel-header">
-            <h2>AWS Configuration</h2>
+            <h2 id="settingsPanelTitle">Run Scan</h2>
             <button class="settings-close" id="settingsClose">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
             </button>
         </div>
         <div class="settings-panel-body">
-            <div class="settings-section">
-                <label for="awsAccessKey">AWS Access Key ID</label>
-                <input type="text" id="awsAccessKey" placeholder="AKIAIOSFODNN7EXAMPLE" autocomplete="off">
-            </div>
-            <div class="settings-section">
-                <label for="awsSecretKey">AWS Secret Access Key</label>
-                <input type="password" id="awsSecretKey" placeholder="••••••••••••••••••••" autocomplete="off">
-                <span class="hint">Credentials are stored in browser only and sent to backend on scan trigger.</span>
-            </div>
-            <div class="settings-section">
-                <label>AWS Regions</label>
-                <div class="region-checkbox-group" id="regionCheckboxGroup">
-                    <label class="region-cb"><input type="checkbox" value="us-east-1"> US East (N. Virginia) — us-east-1</label>
-                    <label class="region-cb"><input type="checkbox" value="us-east-2"> US East (Ohio) — us-east-2</label>
-                    <label class="region-cb"><input type="checkbox" value="us-west-1"> US West (N. California) — us-west-1</label>
-                    <label class="region-cb"><input type="checkbox" value="us-west-2"> US West (Oregon) — us-west-2</label>
-                    <label class="region-cb"><input type="checkbox" value="af-south-1"> Africa (Cape Town) — af-south-1</label>
-                    <label class="region-cb"><input type="checkbox" value="ap-east-1"> Asia Pacific (Hong Kong) — ap-east-1</label>
-                    <label class="region-cb"><input type="checkbox" value="ap-south-1"> Asia Pacific (Mumbai) — ap-south-1</label>
-                    <label class="region-cb"><input type="checkbox" value="ap-southeast-1"> Asia Pacific (Singapore) — ap-southeast-1</label>
-                    <label class="region-cb"><input type="checkbox" value="ap-southeast-2"> Asia Pacific (Sydney) — ap-southeast-2</label>
-                    <label class="region-cb"><input type="checkbox" value="ap-northeast-1"> Asia Pacific (Tokyo) — ap-northeast-1</label>
-                    <label class="region-cb"><input type="checkbox" value="ap-northeast-2"> Asia Pacific (Seoul) — ap-northeast-2</label>
-                    <label class="region-cb"><input type="checkbox" value="ap-northeast-3"> Asia Pacific (Osaka) — ap-northeast-3</label>
-                    <label class="region-cb"><input type="checkbox" value="ca-central-1"> Canada (Central) — ca-central-1</label>
-                    <label class="region-cb"><input type="checkbox" value="eu-central-1"> Europe (Frankfurt) — eu-central-1</label>
-                    <label class="region-cb"><input type="checkbox" value="eu-west-1"> Europe (Ireland) — eu-west-1</label>
-                    <label class="region-cb"><input type="checkbox" value="eu-west-2"> Europe (London) — eu-west-2</label>
-                    <label class="region-cb"><input type="checkbox" value="eu-west-3"> Europe (Paris) — eu-west-3</label>
-                    <label class="region-cb"><input type="checkbox" value="eu-south-1"> Europe (Milan) — eu-south-1</label>
-                    <label class="region-cb"><input type="checkbox" value="eu-north-1"> Europe (Stockholm) — eu-north-1</label>
-                    <label class="region-cb"><input type="checkbox" value="me-south-1"> Middle East (Bahrain) — me-south-1</label>
-                    <label class="region-cb"><input type="checkbox" value="sa-east-1"> South America (São Paulo) — sa-east-1</label>
+
+            <!-- Step 1: Provider selector -->
+            <div id="stepProvider">
+                <div class="settings-section">
+                    <label>Select Cloud Providers</label>
+                    <span class="hint" style="margin-bottom:8px;display:block">Select one or more providers to scan.</span>
+                    <div class="provider-grid" id="providerGrid">
+                        <button class="provider-btn" data-provider="aws" data-has-creds="1">
+                            <span class="provider-icon">☁️</span><span>AWS</span>
+                        </button>
+                        <button class="provider-btn" data-provider="gcp">
+                            <span class="provider-icon">🌐</span><span>GCP</span>
+                        </button>
+                        <button class="provider-btn" data-provider="azure">
+                            <span class="provider-icon">🔷</span><span>Azure</span>
+                        </button>
+                        <button class="provider-btn" data-provider="cloudflare">
+                            <span class="provider-icon">🟠</span><span>Cloudflare</span>
+                        </button>
+                        <button class="provider-btn" data-provider="alibabacloud">
+                            <span class="provider-icon">🔶</span><span>Alibaba Cloud</span>
+                        </button>
+                        <button class="provider-btn" data-provider="kubernetes">
+                            <span class="provider-icon">⚙️</span><span>K8s</span>
+                        </button>
+                        <button class="provider-btn" data-provider="github">
+                            <span class="provider-icon">🐙</span><span>GitHub</span>
+                        </button>
+                        <button class="provider-btn" data-provider="oraclecloud">
+                            <span class="provider-icon">🔴</span><span>OCI</span>
+                        </button>
+                        <button class="provider-btn" data-provider="iac">
+                            <span class="provider-icon">📄</span><span>IaC</span>
+                        </button>
+                        <button class="provider-btn" data-provider="openstack">
+                            <span class="provider-icon">🟢</span><span>OpenStack</span>
+                        </button>
+                    </div>
+                </div>
+                <div class="settings-actions">
+                    <button class="btn-primary" id="providerNextBtn" disabled>Next →</button>
+                    <button class="btn-secondary" id="settingsCancelBtn1">Cancel</button>
                 </div>
             </div>
-        </div>
-        <div class="settings-actions">
-            <button class="btn-primary" id="triggerScan" disabled>Run Prowler Scan</button>
-            <button class="btn-secondary" id="settingsCancelBtn">Cancel</button>
+
+            <!-- Step 2: AWS Credentials (shown only for AWS) -->
+            <div id="stepAwsCreds" style="display:none">
+                <div class="settings-section">
+                    <label for="awsAccessKey">AWS Access Key ID</label>
+                    <input type="text" id="awsAccessKey" placeholder="AKIAIOSFODNN7EXAMPLE" autocomplete="off">
+                </div>
+                <div class="settings-section">
+                    <label for="awsSecretKey">AWS Secret Access Key</label>
+                    <input type="password" id="awsSecretKey" placeholder="••••••••••••••••••••" autocomplete="off">
+                    <span class="hint">Credentials are sent to backend for this scan only.</span>
+                </div>
+                <div class="settings-section">
+                    <label>AWS Regions</label>
+                    <div class="region-checkbox-group" id="regionCheckboxGroup">
+                        <label class="region-cb"><input type="checkbox" value="us-east-1"> US East (N. Virginia) — us-east-1</label>
+                        <label class="region-cb"><input type="checkbox" value="us-east-2"> US East (Ohio) — us-east-2</label>
+                        <label class="region-cb"><input type="checkbox" value="us-west-1"> US West (N. California) — us-west-1</label>
+                        <label class="region-cb"><input type="checkbox" value="us-west-2"> US West (Oregon) — us-west-2</label>
+                        <label class="region-cb"><input type="checkbox" value="af-south-1"> Africa (Cape Town) — af-south-1</label>
+                        <label class="region-cb"><input type="checkbox" value="ap-east-1"> Asia Pacific (Hong Kong) — ap-east-1</label>
+                        <label class="region-cb"><input type="checkbox" value="ap-south-1"> Asia Pacific (Mumbai) — ap-south-1</label>
+                        <label class="region-cb"><input type="checkbox" value="ap-southeast-1"> Asia Pacific (Singapore) — ap-southeast-1</label>
+                        <label class="region-cb"><input type="checkbox" value="ap-southeast-2"> Asia Pacific (Sydney) — ap-southeast-2</label>
+                        <label class="region-cb"><input type="checkbox" value="ap-northeast-1"> Asia Pacific (Tokyo) — ap-northeast-1</label>
+                        <label class="region-cb"><input type="checkbox" value="ap-northeast-2"> Asia Pacific (Seoul) — ap-northeast-2</label>
+                        <label class="region-cb"><input type="checkbox" value="ap-northeast-3"> Asia Pacific (Osaka) — ap-northeast-3</label>
+                        <label class="region-cb"><input type="checkbox" value="ca-central-1"> Canada (Central) — ca-central-1</label>
+                        <label class="region-cb"><input type="checkbox" value="eu-central-1"> Europe (Frankfurt) — eu-central-1</label>
+                        <label class="region-cb"><input type="checkbox" value="eu-west-1"> Europe (Ireland) — eu-west-1</label>
+                        <label class="region-cb"><input type="checkbox" value="eu-west-2"> Europe (London) — eu-west-2</label>
+                        <label class="region-cb"><input type="checkbox" value="eu-west-3"> Europe (Paris) — eu-west-3</label>
+                        <label class="region-cb"><input type="checkbox" value="eu-south-1"> Europe (Milan) — eu-south-1</label>
+                        <label class="region-cb"><input type="checkbox" value="eu-north-1"> Europe (Stockholm) — eu-north-1</label>
+                        <label class="region-cb"><input type="checkbox" value="me-south-1"> Middle East (Bahrain) — me-south-1</label>
+                        <label class="region-cb"><input type="checkbox" value="sa-east-1"> South America (São Paulo) — sa-east-1</label>
+                    </div>
+                </div>
+                <div class="settings-actions">
+                    <button class="btn-secondary" id="awsBackBtn">← Back</button>
+                    <button class="btn-primary" id="awsRunScanBtn" disabled>Run Scan</button>
+                </div>
+            </div>
+
+            <!-- Step 3: Scan progress -->
+            <div id="stepScanProgress" style="display:none">
+                <div class="scan-progress-container">
+                    <div class="scan-ring-wrapper">
+                        <svg class="scan-ring" viewBox="0 0 140 140">
+                            <circle class="scan-ring-bg" cx="70" cy="70" r="62" />
+                            <circle class="scan-ring-fill" id="scanRingFill" cx="70" cy="70" r="62" />
+                        </svg>
+                        <div class="scan-ring-text">
+                            <span class="scan-ring-pct" id="scanRingPct">0%</span>
+                        </div>
+                    </div>
+                    <div class="scan-phase" id="scanPhaseText">Starting...</div>
+                    <div class="scan-provider-label" id="scanProviderLabel"></div>
+                </div>
+                <div class="settings-actions" style="justify-content:center">
+                    <button class="btn-secondary" id="scanCancelBtn">Cancel Scan</button>
+                    <button class="btn-primary" id="scanDoneBtn" style="display:none">Done</button>
+                </div>
+            </div>
+
         </div>
     </div>
 
@@ -96,7 +166,6 @@
     (function() {
         const sidebar = document.getElementById('sidebar');
         sidebar.addEventListener('click', (e) => {
-            // Don't toggle if clicking on interactive elements (links, buttons, inputs)
             const target = e.target.closest('a, button, input, select, label, .settings-btn');
             if (target) return;
             sidebar.classList.toggle('collapsed');
@@ -105,46 +174,200 @@
         sidebar.style.cursor = 'pointer';
     })();
 
-    // Settings panel
+    // Settings panel — multi-step: providers → credentials → scan progress
     (function() {
         const btn = document.getElementById('settingsBtn');
         const overlay = document.getElementById('settingsOverlay');
         const panel = document.getElementById('settingsPanel');
         const closeBtn = document.getElementById('settingsClose');
-        const cancelBtn = document.getElementById('settingsCancelBtn');
-        const triggerBtn = document.getElementById('triggerScan');
+        const panelTitle = document.getElementById('settingsPanelTitle');
+
+        // Steps
+        const stepProvider = document.getElementById('stepProvider');
+        const stepAwsCreds = document.getElementById('stepAwsCreds');
+        const stepProgress = document.getElementById('stepScanProgress');
+
+        // Provider grid
+        const providerBtns = document.querySelectorAll('.provider-btn');
+        const providerNextBtn = document.getElementById('providerNextBtn');
+        const cancelBtn1 = document.getElementById('settingsCancelBtn1');
+
+        // AWS creds
+        const awsBackBtn = document.getElementById('awsBackBtn');
+        const awsRunScanBtn = document.getElementById('awsRunScanBtn');
         const keyInput = document.getElementById('awsAccessKey');
         const secretInput = document.getElementById('awsSecretKey');
         const regionBoxes = document.querySelectorAll('#regionCheckboxGroup input[type="checkbox"]');
 
+        // Progress
+        const scanRingFill = document.getElementById('scanRingFill');
+        const scanRingPct = document.getElementById('scanRingPct');
+        const scanPhaseText = document.getElementById('scanPhaseText');
+        const scanProviderLabel = document.getElementById('scanProviderLabel');
+        const scanCancelBtn = document.getElementById('scanCancelBtn');
+        const scanDoneBtn = document.getElementById('scanDoneBtn');
+
+        let selectedProviders = new Set();
+        let pollTimer = null;
+
+        // Ring circumference
+        const RADIUS = 62;
+        const CIRC = 2 * Math.PI * RADIUS;
+        scanRingFill.style.strokeDasharray = CIRC;
+        scanRingFill.style.strokeDashoffset = CIRC;
+
+        function setRingPct(pct) {
+            const offset = CIRC - (pct / 100) * CIRC;
+            scanRingFill.style.strokeDashoffset = offset;
+            scanRingPct.textContent = Math.round(pct) + '%';
+        }
+
+        function showStep(step) {
+            stepProvider.style.display = step === 'provider' ? '' : 'none';
+            stepAwsCreds.style.display = step === 'aws' ? '' : 'none';
+            stepProgress.style.display = step === 'progress' ? '' : 'none';
+            if (step === 'provider') panelTitle.textContent = 'Run Scan';
+            else if (step === 'aws') panelTitle.textContent = 'AWS Configuration';
+            else if (step === 'progress') panelTitle.textContent = 'Scanning…';
+        }
+
         function openPanel() {
+            showStep('provider');
             overlay.classList.add('open');
             panel.classList.add('open');
         }
         function closePanel() {
+            if (pollTimer) return; // don't close while scanning
             overlay.classList.remove('open');
             panel.classList.remove('open');
         }
-        function getSelectedRegions() {
-            return Array.from(regionBoxes).filter(cb => cb.checked).map(cb => cb.value);
+
+        // Provider toggle
+        providerBtns.forEach(b => {
+            b.addEventListener('click', () => {
+                b.classList.toggle('selected');
+                const p = b.dataset.provider;
+                if (selectedProviders.has(p)) selectedProviders.delete(p);
+                else selectedProviders.add(p);
+                providerNextBtn.disabled = selectedProviders.size === 0;
+            });
+        });
+
+        // Next from providers
+        providerNextBtn.addEventListener('click', () => {
+            if (selectedProviders.has('aws')) {
+                showStep('aws');
+            } else {
+                startScan();
+            }
+        });
+
+        // AWS creds validation
+        function checkAwsReady() {
+            const hasKey = keyInput.value.trim().length > 0;
+            const hasSecret = secretInput.value.trim().length > 0;
+            const hasRegion = Array.from(regionBoxes).some(cb => cb.checked);
+            awsRunScanBtn.disabled = !(hasKey && hasSecret && hasRegion);
         }
-        function checkReady() {
-            const ready = keyInput.value.trim() && secretInput.value.trim() && getSelectedRegions().length > 0;
-            triggerBtn.disabled = !ready;
+        keyInput.addEventListener('input', checkAwsReady);
+        secretInput.addEventListener('input', checkAwsReady);
+        regionBoxes.forEach(cb => cb.addEventListener('change', checkAwsReady));
+
+        awsBackBtn.addEventListener('click', () => showStep('provider'));
+        awsRunScanBtn.addEventListener('click', () => startScan());
+
+        // Cancel buttons
+        cancelBtn1.addEventListener('click', closePanel);
+        closeBtn.addEventListener('click', closePanel);
+        overlay.addEventListener('click', closePanel);
+
+        // --- Start Scan ---
+        async function startScan() {
+            showStep('progress');
+            setRingPct(0);
+            scanPhaseText.textContent = 'Starting…';
+            scanCancelBtn.style.display = '';
+            scanDoneBtn.style.display = 'none';
+
+            const providers = Array.from(selectedProviders);
+            scanProviderLabel.textContent = providers.map(p => p.toUpperCase()).join(', ');
+
+            const regions = Array.from(regionBoxes).filter(cb => cb.checked).map(cb => cb.value);
+            const body = {
+                provider: providers[0], // prowler runs one provider at a time
+                services: [],
+                regions: regions,
+            };
+            if (selectedProviders.has('aws')) {
+                body.access_key = keyInput.value.trim();
+                body.secret_key = secretInput.value.trim();
+            }
+
+            try {
+                const res = await fetch('/scan/start', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(body),
+                });
+                const data = await res.json();
+                if (data.error) {
+                    scanPhaseText.textContent = 'Error: ' + data.error;
+                    scanCancelBtn.style.display = 'none';
+                    scanDoneBtn.style.display = '';
+                    return;
+                }
+            } catch (e) {
+                scanPhaseText.textContent = 'Failed to start scan';
+                scanCancelBtn.style.display = 'none';
+                scanDoneBtn.style.display = '';
+                return;
+            }
+
+            // Poll progress
+            pollTimer = setInterval(async () => {
+                try {
+                    const res = await fetch('/scan/status');
+                    const st = await res.json();
+                    setRingPct(st.progress || 0);
+                    scanPhaseText.textContent = st.phase || 'Working…';
+
+                    if (!st.running) {
+                        clearInterval(pollTimer);
+                        pollTimer = null;
+                        scanCancelBtn.style.display = 'none';
+                        scanDoneBtn.style.display = '';
+                        if (st.error) {
+                            panelTitle.textContent = 'Scan Error';
+                            scanPhaseText.textContent = st.error;
+                        } else {
+                            panelTitle.textContent = 'Scan Complete';
+                            setRingPct(100);
+                        }
+                    }
+                } catch (e) {
+                    // ignore transient fetch errors
+                }
+            }, 1500);
         }
+
+        // Cancel scan
+        scanCancelBtn.addEventListener('click', async () => {
+            try { await fetch('/scan/cancel', {method:'POST'}); } catch(e) {}
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+            scanPhaseText.textContent = 'Cancelled';
+            scanCancelBtn.style.display = 'none';
+            scanDoneBtn.style.display = '';
+            panelTitle.textContent = 'Scan Cancelled';
+        });
+
+        // Done button — close and reload page to pick up new results
+        scanDoneBtn.addEventListener('click', () => {
+            overlay.classList.remove('open');
+            panel.classList.remove('open');
+            window.location.reload();
+        });
 
         btn.addEventListener('click', openPanel);
-        overlay.addEventListener('click', closePanel);
-        closeBtn.addEventListener('click', closePanel);
-        cancelBtn.addEventListener('click', closePanel);
-        keyInput.addEventListener('input', checkReady);
-        secretInput.addEventListener('input', checkReady);
-        regionBoxes.forEach(cb => cb.addEventListener('change', checkReady));
-
-        triggerBtn.addEventListener('click', () => {
-            const regions = getSelectedRegions();
-            alert('Prowler scan trigger is not yet implemented.\n\nSelected regions: ' + regions.join(', '));
-        });
     })();
     </script>
 </body>

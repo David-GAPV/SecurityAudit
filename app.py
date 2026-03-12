@@ -5,6 +5,10 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import threading
+import time
+import uuid
 import zipfile
 from collections import defaultdict
 from flask import Flask, abort, jsonify, render_template, request, send_file
@@ -24,6 +28,20 @@ COMPLIANCE_DIR = os.path.join(
 PROWLER_OUTPUT_DIR = os.path.join(
     os.path.dirname(__file__), "..", "prowler", "output"
 )
+
+PROWLER_DIR = os.path.join(os.path.dirname(__file__), "..", "prowler")
+PROWLER_VENV = "/home/ec2-user/.cache/pypoetry/virtualenvs/prowler-BsfU0Yo9-py3.9"
+
+# ---- Scan state (in-memory, single active scan) ----
+_scan_lock = threading.Lock()
+_scan_state = {
+    "running": False,
+    "provider": None,
+    "progress": 0,
+    "phase": "",         # e.g. "Initializing", "Scanning s3", "Generating reports"
+    "error": None,
+    "pid": None,
+}
 
 # Load service name display mapping
 SERVICE_NAME_MAP = {}
@@ -443,6 +461,251 @@ def import_data():
         return jsonify({"error": "Import failed: " + str(e)}), 500
 
     return jsonify({"success": True, "extracted": extracted})
+
+
+# ---- Scan API endpoints ----
+
+@app.route("/scan/services/<provider>")
+def scan_services(provider):
+    """Return the list of available services for a prowler provider."""
+    provider = re.sub(r'[^a-z0-9_]', '', provider.lower())
+    prowler_bin = os.path.join(PROWLER_VENV, "bin", "prowler")
+    try:
+        result = subprocess.run(
+            [prowler_bin, provider, "--list-services"],
+            capture_output=True, text=True, timeout=30,
+            cwd=PROWLER_DIR,
+        )
+        lines = result.stdout.splitlines()
+        services = [l.strip().lstrip("- ") for l in lines if l.strip().startswith("- ")]
+        return jsonify({"services": services})
+    except FileNotFoundError:
+        return jsonify({"error": "Prowler binary not found"}), 500
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Timeout listing services"}), 504
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def _run_scan(provider, services, regions, aws_creds):
+    """Background thread: run prowler and track progress.
+
+    For AWS scans, writes a temporary profile to ~/.aws/credentials with a
+    random suffix and passes --profile to prowler.  Cleans up when done.
+    """
+    global _scan_state
+    prowler_bin = os.path.join(PROWLER_VENV, "bin", "prowler")
+    profile_name = None
+    scan_log_path = os.path.join(PROWLER_OUTPUT_DIR, "_last_scan.log")
+
+    try:
+        cmd = [prowler_bin, provider, "--no-banner"]
+        if services:
+            cmd += ["--services"] + services
+        if regions:
+            cmd += ["--region"] + regions
+        cmd += [
+            "--output-directory", os.path.abspath(PROWLER_OUTPUT_DIR),
+            "--output-formats", "csv", "html", "json-ocsf",
+        ]
+
+        env = os.environ.copy()
+
+        # For AWS: create a temp profile
+        if provider == "aws" and aws_creds.get("access_key"):
+            profile_name = f"prowler_scan_{uuid.uuid4().hex[:8]}"
+            _write_aws_profile(profile_name,
+                               aws_creds["access_key"],
+                               aws_creds["secret_key"])
+            cmd += ["--profile", profile_name]
+            # Unset env vars so only the profile is used
+            env.pop("AWS_ACCESS_KEY_ID", None)
+            env.pop("AWS_SECRET_ACCESS_KEY", None)
+            env.pop("AWS_SESSION_TOKEN", None)
+
+        with _scan_lock:
+            _scan_state["phase"] = "Initializing"
+            _scan_state["progress"] = 2
+
+        # Use unbuffered byte mode so we can read \r-based progress updates
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            bufsize=0, cwd=PROWLER_DIR, env=env,
+        )
+        with _scan_lock:
+            _scan_state["pid"] = proc.pid
+
+        total_checks = 0
+        line_buf = ""
+
+        with open(scan_log_path, "w", encoding="utf-8") as logf:
+            while True:
+                chunk = proc.stdout.read(1)
+                if not chunk:
+                    break
+                ch = chunk.decode("utf-8", errors="replace")
+                logf.write(ch)
+
+                if ch == "\n" or ch == "\r":
+                    line = line_buf.strip()
+                    line_buf = ""
+                    if not line:
+                        continue
+
+                    # "Executing 43 checks, please wait..."
+                    m = re.search(r'Executing\s+(\d+)\s+checks', line)
+                    if m:
+                        total_checks = int(m.group(1))
+                        with _scan_lock:
+                            _scan_state["phase"] = f"Running {total_checks} checks"
+                            _scan_state["progress"] = 5
+
+                    # Progress bar: "21/43 [48%]" or "|▉▉| 21/43 [100%]"
+                    m = re.search(r'(\d+)/(\d+)\s*\[(\d+)%\]', line)
+                    if m:
+                        done = int(m.group(1))
+                        tot = int(m.group(2))
+                        pct_raw = int(m.group(3))
+                        # Map prowler 0-100% to our 5-92% range
+                        pct = 5 + int(pct_raw * 0.87)
+                        with _scan_lock:
+                            _scan_state["progress"] = min(pct, 92)
+                            _scan_state["phase"] = f"Scanning ({done}/{tot})"
+
+                    # Scan completed
+                    if "Scan completed" in line:
+                        with _scan_lock:
+                            _scan_state["phase"] = "Generating reports"
+                            _scan_state["progress"] = 94
+                else:
+                    line_buf += ch
+
+        proc.wait()
+        if proc.returncode not in (0, 3):
+            # returncode 3 = prowler found failing checks (normal)
+            with _scan_lock:
+                _scan_state["error"] = f"Prowler exited with code {proc.returncode}"
+                _scan_state["progress"] = 100
+                _scan_state["phase"] = "Error"
+        else:
+            with _scan_lock:
+                _scan_state["progress"] = 100
+                _scan_state["phase"] = "Complete"
+    except Exception as e:
+        with _scan_lock:
+            _scan_state["error"] = str(e)
+            _scan_state["progress"] = 100
+            _scan_state["phase"] = "Error"
+    finally:
+        with _scan_lock:
+            _scan_state["running"] = False
+            _scan_state["pid"] = None
+        # Clean up temp profile
+        if profile_name:
+            _remove_aws_profile(profile_name)
+
+
+def _write_aws_profile(profile_name, access_key, secret_key):
+    """Append a temporary profile to ~/.aws/credentials."""
+    creds_path = os.path.expanduser("~/.aws/credentials")
+    os.makedirs(os.path.dirname(creds_path), exist_ok=True)
+    with open(creds_path, "a", encoding="utf-8") as f:
+        f.write(f"\n[{profile_name}]\n")
+        f.write(f"aws_access_key_id = {access_key}\n")
+        f.write(f"aws_secret_access_key = {secret_key}\n")
+
+
+def _remove_aws_profile(profile_name):
+    """Remove a temporary profile from ~/.aws/credentials."""
+    creds_path = os.path.expanduser("~/.aws/credentials")
+    if not os.path.exists(creds_path):
+        return
+    with open(creds_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    out = []
+    skip = False
+    for line in lines:
+        if line.strip() == f"[{profile_name}]":
+            skip = True
+            continue
+        if skip and line.strip().startswith("["):
+            skip = False
+        if not skip:
+            out.append(line)
+    # Remove trailing blank lines
+    while out and out[-1].strip() == "":
+        out.pop()
+    with open(creds_path, "w", encoding="utf-8") as f:
+        f.writelines(out)
+        f.write("\n")
+
+
+@app.route("/scan/start", methods=["POST"])
+def scan_start():
+    """Start a prowler scan in the background."""
+    global _scan_state
+    with _scan_lock:
+        if _scan_state["running"]:
+            return jsonify({"error": "A scan is already running"}), 409
+
+    data = request.get_json(force=True)
+    provider = re.sub(r'[^a-z0-9_]', '', (data.get("provider") or "aws").lower())
+    services = data.get("services") or []
+    regions = data.get("regions") or []
+
+    # Validate services list items
+    services = [re.sub(r'[^a-z0-9_]', '', s.lower()) for s in services if s]
+    regions = [re.sub(r'[^a-z0-9\-]', '', r.lower()) for r in regions if r]
+
+    # Collect AWS credentials for temp profile
+    aws_creds = {}
+    if provider == "aws":
+        ak = data.get("access_key", "").strip()
+        sk = data.get("secret_key", "").strip()
+        if ak and sk:
+            aws_creds["access_key"] = ak
+            aws_creds["secret_key"] = sk
+
+    with _scan_lock:
+        _scan_state = {
+            "running": True,
+            "provider": provider,
+            "progress": 0,
+            "phase": "Starting",
+            "error": None,
+            "pid": None,
+        }
+
+    t = threading.Thread(target=_run_scan, args=(provider, services, regions, aws_creds), daemon=True)
+    t.start()
+    return jsonify({"started": True})
+
+
+@app.route("/scan/status")
+def scan_status():
+    with _scan_lock:
+        return jsonify(dict(_scan_state))
+
+
+@app.route("/scan/cancel", methods=["POST"])
+def scan_cancel():
+    global _scan_state
+    import signal
+    with _scan_lock:
+        if not _scan_state["running"]:
+            return jsonify({"error": "No scan is running"}), 400
+        pid = _scan_state["pid"]
+    if pid:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    with _scan_lock:
+        _scan_state["running"] = False
+        _scan_state["phase"] = "Cancelled"
+        _scan_state["progress"] = 0
+        _scan_state["pid"] = None
+    return jsonify({"cancelled": True})
 
 
 if __name__ == "__main__":
