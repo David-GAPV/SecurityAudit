@@ -162,15 +162,23 @@ def _get_logo(slug):
     return None, None
 
 
+def _base_slug(slug):
+    """Strip trailing _aws or _gcp to get the provider-neutral base slug."""
+    return re.sub(r'_(aws|gcp)$', '', slug)
+
+
 def parse_all_frameworks():
-    """Parse all compliance CSVs and return per-framework summary stats."""
-    frameworks = {}
+    """Parse all compliance CSVs and return per-framework summary stats.
+
+    Frameworks that share the same base slug (e.g. cis_3.0_aws and cis_3.0_gcp)
+    are merged into one entry keyed by the base slug.
+    """
+    # First pass: collect per-slug data (latest file per slug wins)
+    per_slug = {}
     csv_files = sorted(glob.glob(os.path.join(COMPLIANCE_DIR, "*.csv")))
 
     for filepath in csv_files:
         filename = os.path.basename(filepath)
-        # Extract a slug from the filename for URL routing
-        # e.g. prowler-output-..._cis_3.0_aws.csv -> cis_3.0_aws
         parts = filename.split("_", 1)
         if len(parts) < 2:
             continue
@@ -188,22 +196,55 @@ def parse_all_frameworks():
         total = len(rows)
         passed = sum(1 for r in rows if r.get("STATUS", "").upper() == "PASS")
         failed = total - passed
-        score = round((passed / total) * 100, 2) if total else 0
 
-        logo_file, logo_bg = _get_logo(slug)
-
-        frameworks[slug] = {
+        per_slug[slug] = {
             "slug": slug,
             "name": name,
-            "description": description[:80] + ("..." if len(description) > 80 else ""),
-            "full_description": description,
+            "description": description,
             "provider": provider,
             "account_id": account_id,
             "total": total,
             "passed": passed,
             "failed": failed,
-            "score": score,
             "filepath": filepath,
+        }
+
+    # Second pass: merge by base slug
+    frameworks = {}
+    grouped = defaultdict(list)
+    for slug, data in per_slug.items():
+        grouped[_base_slug(slug)].append(data)
+
+    for base, items in grouped.items():
+        total = sum(d["total"] for d in items)
+        passed = sum(d["passed"] for d in items)
+        failed = total - passed
+        score = round((passed / total) * 100, 2) if total else 0
+
+        providers = sorted(set(d["provider"] for d in items))
+        account_ids = sorted(set(d["account_id"] for d in items if d["account_id"]))
+        filepaths = [d["filepath"] for d in items]
+
+        # Use the longest / most descriptive name (prefer the one without
+        # provider-specific qualifier text)
+        name = max((d["name"] for d in items), key=len)
+        description = max((d["description"] for d in items), key=len)
+
+        logo_file, logo_bg = _get_logo(base)
+
+        frameworks[base] = {
+            "slug": base,
+            "name": name,
+            "description": description[:80] + ("..." if len(description) > 80 else ""),
+            "full_description": description,
+            "provider": ", ".join(p.upper() for p in providers),
+            "providers": providers,
+            "account_id": ", ".join(account_ids),
+            "total": total,
+            "passed": passed,
+            "failed": failed,
+            "score": score,
+            "filepaths": filepaths,
             "logo_file": logo_file,
             "logo_bg": logo_bg,
         }
@@ -211,16 +252,44 @@ def parse_all_frameworks():
     return frameworks
 
 
-def parse_framework_detail(filepath):
-    """Parse a single compliance CSV and return section-level breakdown."""
-    rows = _read_csv(filepath)
-    if not rows:
+def parse_framework_detail(filepaths):
+    """Parse one or more compliance CSVs (for merged AWS+GCP) and return section-level breakdown."""
+    if isinstance(filepaths, str):
+        filepaths = [filepaths]
+
+    all_rows = []
+    providers_set = set()
+    account_ids_set = set()
+    name = ""
+    description = ""
+
+    for filepath in filepaths:
+        rows = _read_csv(filepath)
+        if not rows:
+            continue
+        # Track provider for each row
+        file_provider = rows[0].get("PROVIDER", "").strip()
+        for r in rows:
+            r["_provider"] = file_provider
+        all_rows.extend(rows)
+        providers_set.add(file_provider)
+        aid = rows[0].get("ACCOUNTID", "").strip()
+        if aid:
+            account_ids_set.add(aid)
+        # Use the longest name / description
+        n = rows[0].get("NAME", "").strip()
+        d = rows[0].get("DESCRIPTION", "").strip()
+        if len(n) > len(name):
+            name = n
+        if len(d) > len(description):
+            description = d
+
+    if not all_rows:
         return None
 
-    name = rows[0].get("NAME", "").strip()
-    description = rows[0].get("DESCRIPTION", "").strip()
-    provider = rows[0].get("PROVIDER", "").strip()
-    account_id = rows[0].get("ACCOUNTID", "").strip()
+    rows = all_rows
+    provider = ", ".join(p.upper() for p in sorted(providers_set))
+    account_id = ", ".join(sorted(account_ids_set))
 
     total = len(rows)
     passed = sum(1 for r in rows if r.get("STATUS", "").upper() == "PASS")
@@ -252,7 +321,7 @@ def parse_framework_detail(filepath):
         check_id = r.get("CHECKID", "").strip()
         if check_id:
             requirements[req_id]["check_ids"].add(check_id)
-        # Collect resource-level data
+        # Collect resource-level data with provider
         resource_id = r.get("RESOURCEID", "").strip()
         if resource_id:
             requirements[req_id]["resources"].append({
@@ -262,6 +331,7 @@ def parse_framework_detail(filepath):
                 "status_extended": r.get("STATUSEXTENDED", "").strip(),
                 "region": r.get("REGION", "").strip(),
                 "check_id": check_id,
+                "provider": r.get("_provider", "").upper(),
             })
         if r.get("STATUS", "").upper() == "PASS":
             requirements[req_id]["passed"] += 1
@@ -292,6 +362,13 @@ def parse_framework_detail(filepath):
                 svc_raw = enrichment.get("service_name", "")
                 service_display = SERVICE_NAME_MAP.get(svc_raw, svc_raw.replace("_", " ").title() if svc_raw else "")
                 service_icon = SERVICE_ICON_MAP.get(svc_raw, "")
+                # Determine providers for this requirement
+                req_providers = sorted(set(res.get("provider", "") for res in req_data["resources"] if res.get("provider")))
+                if not req_providers:
+                    # Fallback: infer from enrichment
+                    ep = enrichment.get("provider", "").upper()
+                    req_providers = [ep] if ep else []
+
                 sec_reqs.append({
                     "id": req_id,
                     "description": req_data["description"],
@@ -304,6 +381,7 @@ def parse_framework_detail(filepath):
                     "severity": severity,
                     "service_name": service_display,
                     "service_icon": service_icon,
+                    "provider": ", ".join(req_providers) if req_providers else "",
                     "status_extended": enrichment.get("status_extended", ""),
                     "risk": enrichment.get("risk", ""),
                     "remediation_text": enrichment.get("remediation_text", ""),
@@ -347,31 +425,34 @@ def _read_csv(filepath):
 
 
 def _parse_main_prowler_csv():
-    """Parse the main prowler output CSV and build a lookup by CHECK_ID."""
+    """Parse ALL main prowler output CSVs and build a lookup by CHECK_ID."""
     csv_files = sorted(glob.glob(os.path.join(PROWLER_OUTPUT_DIR, "prowler-output-*.csv")))
     # Exclude files in subdirectories (compliance/)
     csv_files = [f for f in csv_files if os.path.abspath(os.path.dirname(f)) == os.path.abspath(PROWLER_OUTPUT_DIR)]
     if not csv_files:
         return {}
-    # Use the first (or only) main output file
-    rows = _read_csv(csv_files[0])
     lookup = {}
-    for r in rows:
-        check_id = r.get("CHECK_ID", "").strip()
-        if not check_id:
-            continue
-        if check_id not in lookup:
-            lookup[check_id] = {
-                "check_id": check_id,
-                "check_title": r.get("CHECK_TITLE", "").strip(),
-                "severity": r.get("SEVERITY", "").strip(),
-                "service_name": r.get("SERVICE_NAME", "").strip(),
-                "status_extended": r.get("STATUS_EXTENDED", "").strip(),
-                "risk": r.get("RISK", "").strip(),
-                "remediation_text": r.get("REMEDIATION_RECOMMENDATION_TEXT", "").strip(),
-                "remediation_url": r.get("REMEDIATION_RECOMMENDATION_URL", "").strip(),
-                "additional_urls": r.get("ADDITIONAL_URLS", "").strip(),
-            }
+    for filepath in csv_files:
+        rows = _read_csv(filepath)
+        for r in rows:
+            check_id = r.get("CHECK_ID", "").strip()
+            if not check_id:
+                continue
+            if check_id not in lookup:
+                lookup[check_id] = {
+                    "check_id": check_id,
+                    "check_title": r.get("CHECK_TITLE", "").strip(),
+                    "severity": r.get("SEVERITY", "").strip(),
+                    "service_name": r.get("SERVICE_NAME", "").strip(),
+                    "provider": r.get("PROVIDER", "").strip(),
+                    "resource_name": r.get("RESOURCE_NAME", "").strip(),
+                    "region": r.get("REGION", "").strip(),
+                    "status_extended": r.get("STATUS_EXTENDED", "").strip(),
+                    "risk": r.get("RISK", "").strip(),
+                    "remediation_text": r.get("REMEDIATION_RECOMMENDATION_TEXT", "").strip(),
+                    "remediation_url": r.get("REMEDIATION_RECOMMENDATION_URL", "").strip(),
+                    "additional_urls": r.get("ADDITIONAL_URLS", "").strip(),
+                }
     return lookup
 
 
@@ -404,7 +485,7 @@ def compliance_detail(slug):
     fw = frameworks.get(slug)
     if not fw:
         abort(404)
-    detail = _get_cached(f"detail:{slug}", lambda: parse_framework_detail(fw["filepath"]))
+    detail = _get_cached(f"detail:{slug}", lambda: parse_framework_detail(fw["filepaths"]))
     if not detail:
         abort(404)
     detail["slug"] = slug
@@ -466,7 +547,7 @@ def api_warmup():
     def _warm():
         frameworks = _get_cached("frameworks", parse_all_frameworks)
         for slug, fw in frameworks.items():
-            _get_cached(f"detail:{slug}", lambda fp=fw["filepath"]: parse_framework_detail(fp))
+            _get_cached(f"detail:{slug}", lambda fps=fw["filepaths"]: parse_framework_detail(fps))
 
     threading.Thread(target=_warm, daemon=True).start()
     return jsonify({"started": True})

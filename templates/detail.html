@@ -114,12 +114,13 @@
             </tr>
             <!-- Expandable requirements -->
             <tr class="requirements-row hidden" data-parent="{{ loop.index }}">
-                <td colspan="6">
+                <td colspan="7">
                     <div class="requirements-container">
                         <table class="requirements-table resizable-req-table">
                             <thead>
                                 <tr>
-                                    <th style="width:50%">Title</th>
+                                    <th style="width:6%">Provider</th>
+                                    <th style="width:44%">Title</th>
                                     <th style="width:8%">Severity</th>
                                     <th style="width:12%">Service Name</th>
                                     <th style="width:8%">Passed</th>
@@ -139,6 +140,11 @@
                                     data-req-urls="{{ req.additional_urls }}"
                                     data-req-resources='{{ req.resources | tojson }}'
                                     data-req-res-lookup='{{ req.resources_lookup | tojson }}'>
+                                    <td class="req-provider-cell">
+                                        {% for p in req.provider.split(', ') if p %}
+                                        <span class="provider-badge provider-{{ p|lower }}">{{ p }}</span>
+                                        {% endfor %}
+                                    </td>
                                     <td class="req-title-cell">{{ req.check_title or req.description or req.id }}</td>
                                     <td>
                                         {% if req.severity %}
@@ -373,15 +379,16 @@ observer.observe(document.querySelector('.table-section'), { subtree: true, attr
         const resContainer = document.getElementById('reqPanelResources');
         if (resources.length > 0) {
             resSection.style.display = '';
-            resContainer.innerHTML = '<table class="req-resources-table"><thead><tr><th>Resource</th><th>Region</th><th>Service</th><th>Status</th></tr></thead><tbody>' +
+            resContainer.innerHTML = '<table class="req-resources-table"><thead><tr><th>Provider</th><th>Resource</th><th>Region</th><th>Service</th><th>Status</th></tr></thead><tbody>' +
                 resources.map(r => {
                     const name = r.resource_name || r.resource_id;
                     const cls = r.status === 'PASS' ? 'res-pass' : 'res-fail';
                     const label = r.status === 'PASS' ? 'Pass' : 'Fail';
                     const region = (r.region || '').replace(/</g,'&lt;');
                     const svc = (resLookup[r.check_id] || '').replace(/</g,'&lt;');
+                    const prov = (r.provider || '').replace(/</g,'&lt;');
 
-                    return '<tr><td class="res-name" title="' + (r.resource_id || '').replace(/"/g,'&quot;') + '">' +
+                    return '<tr><td><span class="provider-badge provider-' + prov.toLowerCase() + '">' + prov + '</span></td><td class="res-name" title="' + (r.resource_id || '').replace(/"/g,'&quot;') + '">' +
                         (name || '').replace(/</g,'&lt;') +
                         '</td><td class=\"res-region\">' + region + '</td><td class=\"res-service\">' + svc + '</td><td><span class=\"res-status ' + cls + '\">' + label + '</span></td></tr>';
                 }).join('') + '</tbody></table>';

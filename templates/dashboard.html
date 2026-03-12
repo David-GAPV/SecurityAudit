@@ -93,8 +93,15 @@
             <label>Provider</label>
             <select id="filterProvider" class="filter-select">
                 <option value="">All</option>
-                {% set providers = frameworks|map(attribute='provider')|unique|sort %}
-                {% for p in providers %}
+                {% set all_providers = [] %}
+                {% for fw in frameworks %}
+                  {% for p in (fw.providers if fw.providers else [fw.provider]) %}
+                    {% if p not in all_providers %}
+                      {% if all_providers.append(p) %}{% endif %}
+                    {% endif %}
+                  {% endfor %}
+                {% endfor %}
+                {% for p in all_providers|sort %}
                 <option value="{{ p }}">{{ p|upper }}</option>
                 {% endfor %}
             </select>
@@ -127,6 +134,7 @@
         <thead>
             <tr>
                 <th>Framework</th>
+                <th>Provider</th>
                 <th>Total Checks</th>
                 <th>Passed Checks</th>
                 <th>Failed Checks</th>
@@ -135,7 +143,7 @@
         </thead>
         <tbody>
             {% for fw in frameworks %}
-            <tr class="clickable-row" data-href="/compliance/{{ fw.slug }}" data-provider="{{ fw.provider }}" data-score="{{ fw.score }}" data-failed="{{ fw.failed }}">
+            <tr class="clickable-row" data-href="/compliance/{{ fw.slug }}" data-provider="{{ fw.providers|join(',') if fw.providers else fw.provider }}" data-score="{{ fw.score }}" data-failed="{{ fw.failed }}">
                 <td class="fw-name">
                     {% if fw.logo_file %}
                     <span class="fw-logo {{ fw.logo_bg }}">
@@ -145,6 +153,11 @@
                     <span class="fw-badge" style="background: #7c3aed">{{ fw.provider[:3]|upper }}</span>
                     {% endif %}
                     {{ fw.name }}
+                </td>
+                <td class="fw-providers">
+                    {% for p in (fw.providers if fw.providers else [fw.provider]) %}
+                    <span class="provider-badge provider-{{ p|lower }}">{{ p|upper }}</span>
+                    {% endfor %}
                 </td>
                 <td>{{ "{:,}".format(fw.total) }}</td>
                 <td>{{ "{:,}".format(fw.passed) }}</td>
@@ -370,7 +383,7 @@ function applyFilters() {
 
         let show = true;
         if (searchQ && !text.includes(searchQ)) show = false;
-        if (providerF && provider !== providerF) show = false;
+        if (providerF && !provider.split(',').includes(providerF)) show = false;
         if (scoreF) {
             const [lo, hi] = scoreF.split('-').map(Number);
             if (score < lo || score > hi) show = false;
