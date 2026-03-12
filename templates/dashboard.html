@@ -52,6 +52,17 @@
         </div>
     </div>
 
+    <!-- Environment Compliance Status -->
+    <div class="card chart-card wide-card" id="envComplianceRow" style="display:none">
+        <div class="card-header">
+            <span>Environment Compliance Status</span>
+            <span class="info-icon" title="Compliance score per environment based on resource tags">&#9432;</span>
+        </div>
+        <div class="chart-resizable-wrapper" style="position: relative; height: 160px;">
+            <canvas id="envComplianceChart"></canvas>
+        </div>
+    </div>
+
     <!-- Top 5 Lowest Scoring -->
     <div class="card chart-card wide-card">
         <div class="card-header">
@@ -139,7 +150,7 @@
                 <td>{{ "{:,}".format(fw.passed) }}</td>
                 <td>
                     {% if fw.failed > 0 %}
-                    <span class="failed-link">{{ "{:,}".format(fw.failed) }}</span>
+                    <span class="failed-count">{{ "{:,}".format(fw.failed) }}</span>
                     {% else %}
                     <span>0</span>
                     {% endif %}
@@ -450,6 +461,57 @@ importFileInput.addEventListener('change', async () => {
         importBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> Import';
     }
 });
+
+// ── Environment Compliance Chart ─────────────────────────────────
+(function() {
+    const tagKey = localStorage.getItem('envTagKey');
+    const row = document.getElementById('envComplianceRow');
+    if (!tagKey || !row) return;
+
+    fetch('/api/env-compliance?tag_key=' + encodeURIComponent(tagKey))
+        .then(r => r.json())
+        .then(data => {
+            if (!data.length) return;
+            row.style.display = '';
+            const labels = data.map(d => d.name);
+            const scores = data.map(d => d.score);
+            const ctx = document.getElementById('envComplianceChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Score %',
+                        data: scores,
+                        backgroundColor: scores.map(s => scoreColor(s)),
+                        borderRadius: 4,
+                        barThickness: 20
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { min: 0, max: 100, grid: { color: '#f1f5f9' }, ticks: { callback: v => v + '%' } },
+                        y: { grid: { display: false }, ticks: { font: { size: 11 } } }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(item) {
+                                    var d = data[item.dataIndex];
+                                    return 'Score: ' + d.score + '% (Pass: ' + d.passed + ', Fail: ' + d.failed + ')';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        })
+        .catch(function(){});
+})();
 
 // ── Background prefetch ──────────────────────────────────────────
 // Warm the server cache for all detail pages, then prefetch HTML

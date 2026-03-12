@@ -498,6 +498,63 @@ body {
     letter-spacing: .5px;
 }
 
+/* Scan progress cards (multi-provider) */
+.scan-progress-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin-bottom: 12px;
+}
+
+.scan-card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.provider-icon-sm {
+    width: 22px;
+    height: 22px;
+    object-fit: contain;
+    border-radius: 4px;
+}
+
+.scan-card-provider {
+    font-weight: 700;
+    font-size: 13px;
+    color: var(--text);
+}
+
+.scan-card-pct {
+    margin-left: auto;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--text);
+}
+
+.scan-bar {
+    height: 7px;
+    background: #e2e8f0;
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+
+.scan-bar-fill {
+    height: 100%;
+    background: var(--purple);
+    border-radius: 4px;
+    transition: width .4s ease, background .3s;
+    width: 0%;
+}
+
+.scan-card-phase {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
 .btn-secondary {
     background: var(--bg);
     color: var(--text);
@@ -633,7 +690,7 @@ body.sidebar-collapsed .content {
 /* ===== Stats Row ===== */
 .stats-row {
     display: grid;
-    grid-template-columns: 220px 180px 1fr;
+    grid-template-columns: 220px 180px 1fr 1fr;
     grid-template-rows: auto;
     align-items: stretch;
     gap: 16px;
@@ -915,6 +972,9 @@ body.sidebar-collapsed .content {
     gap: 10px;
     font-weight: 600;
     white-space: nowrap;
+    max-width: 360px;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .fw-badge, .fw-badge-lg {
@@ -1005,6 +1065,11 @@ body.sidebar-collapsed .content {
     color: var(--red);
     font-weight: 600;
     text-decoration: underline;
+}
+
+.failed-count {
+    color: var(--red);
+    font-weight: 600;
 }
 
 /* ===== Score Bars ===== */
@@ -1540,7 +1605,7 @@ body.sidebar-collapsed .content {
 /* ===== Responsive ===== */
 @media (max-width: 1100px) {
     .stats-row {
-        grid-template-columns: 1fr;
+        grid-template-columns: 220px 180px 1fr;
     }
     .detail-overview {
         grid-template-columns: 1fr;

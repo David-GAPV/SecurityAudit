@@ -3,8 +3,11 @@ import glob
 import io
 import json
 import os
+import pty
 import re
+import select
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -32,16 +35,15 @@ PROWLER_OUTPUT_DIR = os.path.join(
 PROWLER_DIR = os.path.join(os.path.dirname(__file__), "..", "prowler")
 PROWLER_VENV = "/home/ec2-user/.cache/pypoetry/virtualenvs/prowler-BsfU0Yo9-py3.9"
 
-# ---- Scan state (in-memory, single active scan) ----
-_scan_lock = threading.Lock()
-_scan_state = {
-    "running": False,
-    "provider": None,
-    "progress": 0,
-    "phase": "",         # e.g. "Initializing", "Scanning s3", "Generating reports"
-    "error": None,
-    "pid": None,
-}
+# ---- Scan state (supports parallel provider scans) ----
+_scans_lock = threading.Lock()
+_scans = {}  # key: scan_id (e.g. "aws_a1b2c3"), value: state dict
+
+GCLOUD_BIN = "/opt/google-cloud-sdk/bin/gcloud"
+
+# ---- GCP authentication state ----
+_gcp_auth_lock = threading.Lock()
+_gcp_auth_proc = None  # subprocess.Popen for gcloud auth
 
 # ---- Data cache (avoids re-parsing CSVs on every request) ----
 _data_cache = {}
@@ -411,6 +413,50 @@ def compliance_detail(slug):
     return render_template("detail.html", fw=detail)
 
 
+@app.route("/api/env-compliance")
+def api_env_compliance():
+    """Return per-environment compliance scores based on a tag key."""
+    tag_key = request.args.get("tag_key", "").strip()
+    if not tag_key:
+        return jsonify([])
+
+    def _build():
+        csv_files = sorted(glob.glob(os.path.join(PROWLER_OUTPUT_DIR, "prowler-output-*.csv")))
+        csv_files = [f for f in csv_files if os.path.abspath(os.path.dirname(f)) == os.path.abspath(PROWLER_OUTPUT_DIR)]
+        if not csv_files:
+            return []
+        envs = defaultdict(lambda: {"passed": 0, "failed": 0})
+        for filepath in csv_files:
+            rows = _read_csv(filepath)
+            for r in rows:
+                tags_raw = r.get("RESOURCE_TAGS", "").strip()
+                if not tags_raw:
+                    continue
+                status = r.get("STATUS", "").strip().upper()
+                if status not in ("PASS", "FAIL"):
+                    continue
+                for part in tags_raw.split(" | "):
+                    part = part.strip()
+                    if "=" not in part:
+                        continue
+                    k, v = part.split("=", 1)
+                    if k.strip() == tag_key:
+                        env_name = v.strip()
+                        if status == "PASS":
+                            envs[env_name]["passed"] += 1
+                        else:
+                            envs[env_name]["failed"] += 1
+        result = []
+        for name, counts in sorted(envs.items()):
+            total = counts["passed"] + counts["failed"]
+            score = round((counts["passed"] / total) * 100, 2) if total else 0
+            result.append({"name": name, "passed": counts["passed"], "failed": counts["failed"], "score": score})
+        return result
+
+    data = _get_cached(f"env_compliance:{tag_key}", _build)
+    return jsonify(data)
+
+
 @app.route("/api/warmup", methods=["POST"])
 def api_warmup():
     """Kick off background cache warming of all detail pages.
@@ -575,120 +621,133 @@ def scan_services(provider):
         return jsonify({"error": str(e)}), 500
 
 
-def _run_scan(provider, services, regions, aws_creds):
-    """Background thread: run prowler and track progress.
-
-    For AWS scans, writes a temporary profile to ~/.aws/credentials with a
-    random suffix and passes --profile to prowler.  Cleans up when done.
-    """
-    global _scan_state
+def _run_scan(scan_id, provider, services, regions, creds):
+    """Background thread: run prowler for one provider and track progress."""
     prowler_bin = os.path.join(PROWLER_VENV, "bin", "prowler")
     profile_name = None
-    scan_log_path = os.path.join(PROWLER_OUTPUT_DIR, "_last_scan.log")
+    master_fd = None
+    scan_log_path = os.path.join(PROWLER_OUTPUT_DIR, f"_last_scan_{provider}.log")
 
     try:
         cmd = [prowler_bin, provider, "--no-banner"]
         if services:
             cmd += ["--services"] + services
-        if regions:
+        # Only pass --region for providers that support it (not GCP)
+        if regions and provider != "gcp":
             cmd += ["--region"] + regions
+
+        # GCP-specific flags
+        if provider == "gcp" and creds.get("project_ids"):
+            cmd += ["--project-ids"] + creds["project_ids"]
+
         cmd += [
             "--output-directory", os.path.abspath(PROWLER_OUTPUT_DIR),
             "--output-formats", "csv", "html", "json-ocsf",
         ]
 
         env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        env["TERM"] = "dumb"
 
         # For AWS: create a temp profile
-        if provider == "aws" and aws_creds.get("access_key"):
+        if provider == "aws" and creds.get("access_key"):
             profile_name = f"prowler_scan_{uuid.uuid4().hex[:8]}"
-            _write_aws_profile(profile_name,
-                               aws_creds["access_key"],
-                               aws_creds["secret_key"])
+            _write_aws_profile(profile_name, creds["access_key"], creds["secret_key"])
             cmd += ["--profile", profile_name]
-            # Unset env vars so only the profile is used
             env.pop("AWS_ACCESS_KEY_ID", None)
             env.pop("AWS_SECRET_ACCESS_KEY", None)
             env.pop("AWS_SESSION_TOKEN", None)
 
-        with _scan_lock:
-            _scan_state["phase"] = "Initializing"
-            _scan_state["progress"] = 2
+        with _scans_lock:
+            _scans[scan_id]["phase"] = "Initializing"
+            _scans[scan_id]["progress"] = 2
 
-        # Use unbuffered byte mode so we can read \r-based progress updates
+        # Use a PTY so prowler flushes output in real time
+        master_fd, slave_fd = pty.openpty()
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            bufsize=0, cwd=PROWLER_DIR, env=env,
+            cmd, stdout=slave_fd, stderr=slave_fd,
+            cwd=PROWLER_DIR, env=env,
         )
-        with _scan_lock:
-            _scan_state["pid"] = proc.pid
+        os.close(slave_fd)
 
-        total_checks = 0
-        line_buf = ""
+        with _scans_lock:
+            _scans[scan_id]["pid"] = proc.pid
+
+        line_buf = b""
 
         with open(scan_log_path, "w", encoding="utf-8") as logf:
             while True:
-                chunk = proc.stdout.read(1)
-                if not chunk:
+                # Check if process has exited and no more data
+                ready, _, _ = select.select([master_fd], [], [], 2.0)
+                if not ready:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                try:
+                    data = os.read(master_fd, 4096)
+                except OSError:
                     break
-                ch = chunk.decode("utf-8", errors="replace")
-                logf.write(ch)
+                if not data:
+                    break
 
-                if ch == "\n" or ch == "\r":
-                    line = line_buf.strip()
-                    line_buf = ""
-                    if not line:
-                        continue
+                for byte in data:
+                    ch = bytes([byte])
+                    if ch in (b"\n", b"\r"):
+                        line = line_buf.decode("utf-8", errors="replace").strip()
+                        line_buf = b""
+                        if not line:
+                            continue
+                        logf.write(line + "\n")
+                        logf.flush()
 
-                    # "Executing 43 checks, please wait..."
-                    m = re.search(r'Executing\s+(\d+)\s+checks', line)
-                    if m:
-                        total_checks = int(m.group(1))
-                        with _scan_lock:
-                            _scan_state["phase"] = f"Running {total_checks} checks"
-                            _scan_state["progress"] = 5
+                        m = re.search(r'Executing\s+(\d+)\s+checks', line)
+                        if m:
+                            total_checks = int(m.group(1))
+                            with _scans_lock:
+                                _scans[scan_id]["phase"] = f"Running {total_checks} checks"
+                                _scans[scan_id]["progress"] = 5
 
-                    # Progress bar: "21/43 [48%]" or "|▉▉| 21/43 [100%]"
-                    m = re.search(r'(\d+)/(\d+)\s*\[(\d+)%\]', line)
-                    if m:
-                        done = int(m.group(1))
-                        tot = int(m.group(2))
-                        pct_raw = int(m.group(3))
-                        # Map prowler 0-100% to our 5-92% range
-                        pct = 5 + int(pct_raw * 0.87)
-                        with _scan_lock:
-                            _scan_state["progress"] = min(pct, 92)
-                            _scan_state["phase"] = f"Scanning ({done}/{tot})"
+                        m = re.search(r'(\d+)/(\d+)\s*\[(\d+)%\]', line)
+                        if m:
+                            done = int(m.group(1))
+                            tot = int(m.group(2))
+                            pct_raw = int(m.group(3))
+                            pct = 5 + int(pct_raw * 0.87)
+                            with _scans_lock:
+                                _scans[scan_id]["progress"] = min(pct, 92)
+                                _scans[scan_id]["phase"] = f"Scanning ({done}/{tot})"
 
-                    # Scan completed
-                    if "Scan completed" in line:
-                        with _scan_lock:
-                            _scan_state["phase"] = "Generating reports"
-                            _scan_state["progress"] = 94
-                else:
-                    line_buf += ch
+                        if "Scan completed" in line:
+                            with _scans_lock:
+                                _scans[scan_id]["phase"] = "Generating reports"
+                                _scans[scan_id]["progress"] = 94
+                    else:
+                        line_buf += ch
 
         proc.wait()
         if proc.returncode not in (0, 3):
-            # returncode 3 = prowler found failing checks (normal)
-            with _scan_lock:
-                _scan_state["error"] = f"Prowler exited with code {proc.returncode}"
-                _scan_state["progress"] = 100
-                _scan_state["phase"] = "Error"
+            with _scans_lock:
+                _scans[scan_id]["error"] = f"Prowler exited with code {proc.returncode}"
+                _scans[scan_id]["progress"] = 100
+                _scans[scan_id]["phase"] = "Error"
         else:
-            with _scan_lock:
-                _scan_state["progress"] = 100
-                _scan_state["phase"] = "Complete"
+            with _scans_lock:
+                _scans[scan_id]["progress"] = 100
+                _scans[scan_id]["phase"] = "Complete"
     except Exception as e:
-        with _scan_lock:
-            _scan_state["error"] = str(e)
-            _scan_state["progress"] = 100
-            _scan_state["phase"] = "Error"
+        with _scans_lock:
+            _scans[scan_id]["error"] = str(e)
+            _scans[scan_id]["progress"] = 100
+            _scans[scan_id]["phase"] = "Error"
     finally:
-        with _scan_lock:
-            _scan_state["running"] = False
-            _scan_state["pid"] = None
-        # Clean up temp profile
+        if master_fd is not None:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+        with _scans_lock:
+            _scans[scan_id]["running"] = False
+            _scans[scan_id]["pid"] = None
         if profile_name:
             _remove_aws_profile(profile_name)
 
@@ -728,73 +787,175 @@ def _remove_aws_profile(profile_name):
         f.write("\n")
 
 
+# ---- GCP Authentication ----
+
+@app.route("/scan/gcp/auth-start", methods=["POST"])
+def gcp_auth_start():
+    """Start gcloud auth flow; return the URL for the user to open."""
+    global _gcp_auth_proc
+    with _gcp_auth_lock:
+        if _gcp_auth_proc and _gcp_auth_proc.poll() is None:
+            _gcp_auth_proc.kill()
+            _gcp_auth_proc = None
+
+    if not os.path.isfile(GCLOUD_BIN):
+        return jsonify({"error": "gcloud CLI not found at " + GCLOUD_BIN}), 500
+
+    try:
+        proc = subprocess.Popen(
+            [GCLOUD_BIN, "auth", "application-default", "login", "--no-launch-browser"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+        )
+    except Exception as e:
+        return jsonify({"error": "Failed to start gcloud: " + str(e)}), 500
+
+    # Read output line-by-line until we find the auth URL
+    url = None
+    line_buf = b""
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        byte = proc.stdout.read(1)
+        if not byte:
+            break
+        if byte in (b"\n", b"\r"):
+            line = line_buf.decode("utf-8", errors="replace").strip()
+            line_buf = b""
+            if line.startswith("https://accounts.google.com/"):
+                url = line
+                break
+        else:
+            line_buf += byte
+
+    if not url:
+        proc.kill()
+        return jsonify({"error": "Failed to get authentication URL"}), 500
+
+    with _gcp_auth_lock:
+        _gcp_auth_proc = proc
+
+    return jsonify({"url": url})
+
+
+@app.route("/scan/gcp/auth-code", methods=["POST"])
+def gcp_auth_code():
+    """Submit the verification code to the running gcloud auth process."""
+    global _gcp_auth_proc
+    data = request.get_json(force=True)
+    code = data.get("code", "").strip()
+    if not code:
+        return jsonify({"error": "Verification code is required"}), 400
+
+    with _gcp_auth_lock:
+        proc = _gcp_auth_proc
+        if not proc or proc.poll() is not None:
+            return jsonify({"error": "No authentication in progress"}), 400
+
+    try:
+        proc.stdin.write((code + "\n").encode("utf-8"))
+        proc.stdin.close()
+        # Drain remaining stdout to avoid pipe deadlock
+        proc.stdout.read()
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return jsonify({"error": "Authentication timed out"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        with _gcp_auth_lock:
+            _gcp_auth_proc = None
+
+    if proc.returncode == 0:
+        return jsonify({"success": True})
+    return jsonify({"error": "Authentication failed (exit code " + str(proc.returncode) + ")"}), 500
+
+
+# ---- Scan start / status / cancel (parallel multi-provider) ----
+
 @app.route("/scan/start", methods=["POST"])
 def scan_start():
-    """Start a prowler scan in the background."""
-    global _scan_state
-    with _scan_lock:
-        if _scan_state["running"]:
-            return jsonify({"error": "A scan is already running"}), 409
-
+    """Start prowler scans for one or more providers in parallel."""
     data = request.get_json(force=True)
-    provider = re.sub(r'[^a-z0-9_]', '', (data.get("provider") or "aws").lower())
-    services = data.get("services") or []
-    regions = data.get("regions") or []
+    providers = data.get("providers") or []
+    if not providers:
+        return jsonify({"error": "No providers specified"}), 400
 
-    # Validate services list items
-    services = [re.sub(r'[^a-z0-9_]', '', s.lower()) for s in services if s]
-    regions = [re.sub(r'[^a-z0-9\-]', '', r.lower()) for r in regions if r]
+    # Clear finished scans from previous run
+    with _scans_lock:
+        finished = [k for k, v in _scans.items() if not v["running"]]
+        for k in finished:
+            del _scans[k]
 
-    # Collect AWS credentials for temp profile
-    aws_creds = {}
-    if provider == "aws":
-        ak = data.get("access_key", "").strip()
-        sk = data.get("secret_key", "").strip()
-        if ak and sk:
-            aws_creds["access_key"] = ak
-            aws_creds["secret_key"] = sk
+    scan_ids = []
+    for pc in providers:
+        provider = re.sub(r'[^a-z0-9_]', '', (pc.get("provider") or "").lower())
+        if not provider:
+            continue
+        services = [re.sub(r'[^a-z0-9_]', '', s.lower()) for s in (pc.get("services") or []) if s]
+        regions = [re.sub(r'[^a-z0-9\-]', '', r.lower()) for r in (pc.get("regions") or []) if r]
 
-    with _scan_lock:
-        _scan_state = {
-            "running": True,
-            "provider": provider,
-            "progress": 0,
-            "phase": "Starting",
-            "error": None,
-            "pid": None,
-        }
+        creds = {}
+        if provider == "aws":
+            ak = pc.get("access_key", "").strip()
+            sk = pc.get("secret_key", "").strip()
+            if ak and sk:
+                creds["access_key"] = ak
+                creds["secret_key"] = sk
+        elif provider == "gcp":
+            pids = pc.get("project_ids") or []
+            pids = [re.sub(r'[^a-z0-9\-_]', '', p.strip()) for p in pids if p.strip()]
+            if pids:
+                creds["project_ids"] = pids
 
-    t = threading.Thread(target=_run_scan, args=(provider, services, regions, aws_creds), daemon=True)
-    t.start()
-    return jsonify({"started": True})
+        scan_id = f"{provider}_{uuid.uuid4().hex[:8]}"
+        with _scans_lock:
+            _scans[scan_id] = {
+                "running": True,
+                "provider": provider,
+                "progress": 0,
+                "phase": "Starting",
+                "error": None,
+                "pid": None,
+            }
+        t = threading.Thread(
+            target=_run_scan,
+            args=(scan_id, provider, services, regions, creds),
+            daemon=True,
+        )
+        t.start()
+        scan_ids.append(scan_id)
+
+    return jsonify({"started": True, "scan_ids": scan_ids})
 
 
 @app.route("/scan/status")
 def scan_status():
-    with _scan_lock:
-        return jsonify(dict(_scan_state))
+    with _scans_lock:
+        scans = {k: dict(v) for k, v in _scans.items()}
+    return jsonify({"scans": scans})
 
 
 @app.route("/scan/cancel", methods=["POST"])
 def scan_cancel():
-    global _scan_state
-    import signal
-    with _scan_lock:
-        if not _scan_state["running"]:
-            return jsonify({"error": "No scan is running"}), 400
-        pid = _scan_state["pid"]
-    if pid:
+    with _scans_lock:
+        pids = [(k, v["pid"]) for k, v in _scans.items() if v["running"] and v["pid"]]
+    for scan_id, pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
         except OSError:
             pass
-    with _scan_lock:
-        _scan_state["running"] = False
-        _scan_state["phase"] = "Cancelled"
-        _scan_state["progress"] = 0
-        _scan_state["pid"] = None
+    with _scans_lock:
+        for k in _scans:
+            if _scans[k]["running"]:
+                _scans[k]["running"] = False
+                _scans[k]["phase"] = "Cancelled"
+                _scans[k]["progress"] = 0
+                _scans[k]["pid"] = None
     return jsonify({"cancelled": True})
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=True, use_reloader=False, host="0.0.0.0", port=5000)

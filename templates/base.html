@@ -94,6 +94,15 @@
                         </button>
                     </div>
                 </div>
+                <div class="settings-section">
+                    <label for="envTagKey">Resource Tag Filter</label>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <input type="text" id="envTagKey" placeholder="Tag Key, e.g. Environment" autocomplete="off" style="flex:1">
+                        <span style="color:var(--text-muted)">=</span>
+                        <input type="text" id="envTagValue" placeholder="(all values)" autocomplete="off" style="flex:1" disabled>
+                    </div>
+                    <span class="hint">Tag key used to group resources by environment in the dashboard chart.</span>
+                </div>
                 <div class="settings-actions">
                     <button class="btn-primary" id="providerNextBtn" disabled>Next →</button>
                     <button class="btn-secondary" id="settingsCancelBtn1">Cancel</button>
@@ -143,26 +152,51 @@
                 </div>
             </div>
 
+            <!-- Step 2b: GCP Credentials -->
+            <div id="stepGcpCreds" style="display:none">
+                <div class="settings-section">
+                    <label for="gcpProjectId">GCP Project ID</label>
+                    <input type="text" id="gcpProjectId" placeholder="e.g. my-project-123456" autocomplete="off">
+                </div>
+                <div class="settings-section">
+                    <label>Authentication</label>
+                    <button class="btn-secondary" id="gcpAuthBtn" style="width:100%">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>
+                        Authenticate with Google
+                    </button>
+                    <div id="gcpAuthUrlBox" style="display:none;margin-top:10px">
+                        <span class="hint" style="display:block;margin-bottom:4px">Open this link in your browser to sign in:</span>
+                        <div style="display:flex;gap:6px;align-items:center;margin-bottom:10px">
+                            <input type="text" id="gcpAuthUrlDisplay" readonly style="flex:1;font-size:11px;cursor:pointer" title="Click to copy">
+                            <a id="gcpAuthUrlLink" href="#" target="_blank" rel="noopener" class="btn-secondary" style="padding:6px 10px;white-space:nowrap;font-size:12px">Open ↗</a>
+                        </div>
+                        <label for="gcpVerifyCode">Verification Code</label>
+                        <input type="text" id="gcpVerifyCode" placeholder="Paste the code here" autocomplete="off">
+                        <button class="btn-primary" id="gcpSubmitCodeBtn" disabled style="width:100%;margin-top:8px">Submit Code</button>
+                    </div>
+                    <div id="gcpAuthSuccess" style="display:none;margin-top:8px">
+                        <span style="color:#10b981;font-weight:600">✓ Authenticated successfully</span>
+                    </div>
+                    <div id="gcpAuthError" style="display:none;margin-top:8px">
+                        <span style="color:#ef4444;font-weight:600" id="gcpAuthErrMsg"></span>
+                    </div>
+                </div>
+                <div class="settings-actions">
+                    <button class="btn-secondary" id="gcpBackBtn">← Back</button>
+                    <button class="btn-primary" id="gcpScanBtn" disabled>Scan</button>
+                </div>
+            </div>
+
             <!-- Step 3: Scan progress -->
             <div id="stepScanProgress" style="display:none">
-                <div class="scan-progress-container">
-                    <div class="scan-ring-wrapper">
-                        <svg class="scan-ring" viewBox="0 0 140 140">
-                            <circle class="scan-ring-bg" cx="70" cy="70" r="62" />
-                            <circle class="scan-ring-fill" id="scanRingFill" cx="70" cy="70" r="62" />
-                        </svg>
-                        <div class="scan-ring-text">
-                            <span class="scan-ring-pct" id="scanRingPct">0%</span>
-                        </div>
-                    </div>
-                    <div class="scan-phase" id="scanPhaseText">Starting...</div>
-                    <div class="scan-provider-label" id="scanProviderLabel"></div>
-                </div>
+                <div id="scanProgressCards"></div>
                 <div class="settings-actions" style="justify-content:center">
-                    <button class="btn-secondary" id="scanCancelBtn">Cancel Scan</button>
+                    <button class="btn-secondary" id="scanCancelBtn">Cancel All</button>
                     <button class="btn-primary" id="scanDoneBtn" style="display:none">Done</button>
                 </div>
             </div>
+
+
 
         </div>
     </div>
@@ -195,7 +229,9 @@
         // Steps
         const stepProvider = document.getElementById('stepProvider');
         const stepAwsCreds = document.getElementById('stepAwsCreds');
+        const stepGcpCreds = document.getElementById('stepGcpCreds');
         const stepProgress = document.getElementById('stepScanProgress');
+        const allSteps = [stepProvider, stepAwsCreds, stepGcpCreds, stepProgress];
 
         // Provider grid
         const providerBtns = document.querySelectorAll('.provider-btn');
@@ -209,36 +245,57 @@
         const secretInput = document.getElementById('awsSecretKey');
         const regionBoxes = document.querySelectorAll('#regionCheckboxGroup input[type="checkbox"]');
 
+        // GCP creds
+        const gcpProjectInput = document.getElementById('gcpProjectId');
+        const gcpAuthBtn = document.getElementById('gcpAuthBtn');
+        const gcpAuthUrlBox = document.getElementById('gcpAuthUrlBox');
+        const gcpAuthUrlDisplay = document.getElementById('gcpAuthUrlDisplay');
+        const gcpAuthUrlLink = document.getElementById('gcpAuthUrlLink');
+        const gcpVerifyCode = document.getElementById('gcpVerifyCode');
+        const gcpSubmitCodeBtn = document.getElementById('gcpSubmitCodeBtn');
+        const gcpAuthSuccess = document.getElementById('gcpAuthSuccess');
+        const gcpAuthError = document.getElementById('gcpAuthError');
+        const gcpAuthErrMsg = document.getElementById('gcpAuthErrMsg');
+        const gcpBackBtn = document.getElementById('gcpBackBtn');
+        const gcpScanBtn = document.getElementById('gcpScanBtn');
+        let gcpAuthenticated = false;
+
         // Progress
-        const scanRingFill = document.getElementById('scanRingFill');
-        const scanRingPct = document.getElementById('scanRingPct');
-        const scanPhaseText = document.getElementById('scanPhaseText');
-        const scanProviderLabel = document.getElementById('scanProviderLabel');
         const scanCancelBtn = document.getElementById('scanCancelBtn');
         const scanDoneBtn = document.getElementById('scanDoneBtn');
 
+        // Environment tag input
+        const envTagKeyInput = document.getElementById('envTagKey');
+
         let selectedProviders = new Set();
         let pollTimer = null;
+        let credsQueue = [];  // e.g. ['aws', 'gcp']
+        let credsIdx = 0;
 
-        // Ring circumference
-        const RADIUS = 62;
-        const CIRC = 2 * Math.PI * RADIUS;
-        scanRingFill.style.strokeDasharray = CIRC;
-        scanRingFill.style.strokeDashoffset = CIRC;
-
-        function setRingPct(pct) {
-            const offset = CIRC - (pct / 100) * CIRC;
-            scanRingFill.style.strokeDashoffset = offset;
-            scanRingPct.textContent = Math.round(pct) + '%';
-        }
+        const providerIcons = {
+            aws: "{{ url_for('static', filename='logos/aws_run-scan-panel.png') }}",
+            gcp: "{{ url_for('static', filename='logos/gcp.jpg') }}",
+            azure: "{{ url_for('static', filename='logos/Azure.png') }}",
+            cloudflare: "{{ url_for('static', filename='logos/cloudflare.webp') }}",
+            alibabacloud: "{{ url_for('static', filename='logos/alibabacloud.png') }}",
+            kubernetes: "{{ url_for('static', filename='logos/k8s.png') }}",
+            github: "{{ url_for('static', filename='logos/github.png') }}",
+            oraclecloud: "{{ url_for('static', filename='logos/OCI.png') }}",
+            iac: "{{ url_for('static', filename='logos/IaC.webp') }}",
+            openstack: "{{ url_for('static', filename='logos/Openstack.png') }}",
+        };
 
         function showStep(step) {
-            stepProvider.style.display = step === 'provider' ? '' : 'none';
-            stepAwsCreds.style.display = step === 'aws' ? '' : 'none';
-            stepProgress.style.display = step === 'progress' ? '' : 'none';
-            if (step === 'provider') panelTitle.textContent = 'Run Scan';
-            else if (step === 'aws') panelTitle.textContent = 'AWS Configuration';
-            else if (step === 'progress') panelTitle.textContent = 'Scanning…';
+            allSteps.forEach(s => s.style.display = 'none');
+            if (step === 'provider') { stepProvider.style.display = ''; panelTitle.textContent = 'Run Scan'; }
+            else if (step === 'aws') { stepAwsCreds.style.display = ''; panelTitle.textContent = 'AWS Configuration'; }
+            else if (step === 'gcp') { stepGcpCreds.style.display = ''; panelTitle.textContent = 'GCP Configuration'; }
+            else if (step === 'progress') { stepProgress.style.display = ''; panelTitle.textContent = 'Scanning…'; }
+
+            // Update button labels — last creds step says "Scan", others say "Next →"
+            const isLast = credsIdx >= credsQueue.length - 1;
+            awsRunScanBtn.textContent = isLast ? 'Scan' : 'Next →';
+            gcpScanBtn.textContent = isLast ? 'Scan' : 'Next →';
         }
 
         function openPanel() {
@@ -247,9 +304,19 @@
             panel.classList.add('open');
         }
         function closePanel() {
-            if (pollTimer) return; // don't close while scanning
+            if (pollTimer) return;
             overlay.classList.remove('open');
             panel.classList.remove('open');
+        }
+
+        // Advance through credential steps or start scan
+        function advanceCredsOrScan() {
+            credsIdx++;
+            if (credsIdx < credsQueue.length) {
+                showStep(credsQueue[credsIdx]);
+            } else {
+                startScan();
+            }
         }
 
         // Provider toggle
@@ -265,14 +332,19 @@
 
         // Next from providers
         providerNextBtn.addEventListener('click', () => {
-            if (selectedProviders.has('aws')) {
-                showStep('aws');
+            credsQueue = [];
+            if (selectedProviders.has('aws')) credsQueue.push('aws');
+            if (selectedProviders.has('gcp')) credsQueue.push('gcp');
+
+            if (credsQueue.length > 0) {
+                credsIdx = 0;
+                showStep(credsQueue[0]);
             } else {
                 startScan();
             }
         });
 
-        // AWS creds validation
+        // ── AWS creds ──
         function checkAwsReady() {
             const hasKey = keyInput.value.trim().length > 0;
             const hasSecret = secretInput.value.trim().length > 0;
@@ -282,52 +354,155 @@
         keyInput.addEventListener('input', checkAwsReady);
         secretInput.addEventListener('input', checkAwsReady);
         regionBoxes.forEach(cb => cb.addEventListener('change', checkAwsReady));
+        awsBackBtn.addEventListener('click', () => {
+            if (credsIdx > 0) { credsIdx--; showStep(credsQueue[credsIdx]); }
+            else showStep('provider');
+        });
+        awsRunScanBtn.addEventListener('click', advanceCredsOrScan);
 
-        awsBackBtn.addEventListener('click', () => showStep('provider'));
-        awsRunScanBtn.addEventListener('click', () => startScan());
+        // ── GCP creds ──
+        function checkGcpReady() {
+            const hasProject = gcpProjectInput.value.trim().length > 0;
+            gcpScanBtn.disabled = !(hasProject && gcpAuthenticated);
+        }
+        gcpProjectInput.addEventListener('input', checkGcpReady);
 
-        // Cancel buttons
+        gcpAuthBtn.addEventListener('click', async () => {
+            gcpAuthBtn.disabled = true;
+            gcpAuthBtn.textContent = 'Starting…';
+            gcpAuthSuccess.style.display = 'none';
+            gcpAuthError.style.display = 'none';
+            gcpAuthUrlBox.style.display = 'none';
+
+            try {
+                const res = await fetch('/scan/gcp/auth-start', { method: 'POST' });
+                const data = await res.json();
+                if (data.error) {
+                    gcpAuthError.style.display = '';
+                    gcpAuthErrMsg.textContent = data.error;
+                } else {
+                    gcpAuthUrlDisplay.value = data.url;
+                    gcpAuthUrlLink.href = data.url;
+                    gcpAuthUrlBox.style.display = '';
+                    gcpVerifyCode.value = '';
+                    gcpSubmitCodeBtn.disabled = true;
+                }
+            } catch (e) {
+                gcpAuthError.style.display = '';
+                gcpAuthErrMsg.textContent = 'Failed to start authentication';
+            } finally {
+                gcpAuthBtn.disabled = false;
+                gcpAuthBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:middle;margin-right:4px"><path d="M15 3h4a2 2 0 012 2v14a2 2 0 01-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg> Authenticate with Google';
+            }
+        });
+
+        // Copy URL on click
+        gcpAuthUrlDisplay.addEventListener('click', () => {
+            gcpAuthUrlDisplay.select();
+            navigator.clipboard.writeText(gcpAuthUrlDisplay.value).catch(() => {});
+        });
+
+        gcpVerifyCode.addEventListener('input', () => {
+            gcpSubmitCodeBtn.disabled = gcpVerifyCode.value.trim().length === 0;
+        });
+
+        gcpSubmitCodeBtn.addEventListener('click', async () => {
+            gcpSubmitCodeBtn.disabled = true;
+            gcpSubmitCodeBtn.textContent = 'Verifying…';
+            gcpAuthError.style.display = 'none';
+
+            try {
+                const res = await fetch('/scan/gcp/auth-code', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ code: gcpVerifyCode.value.trim() }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    gcpAuthenticated = true;
+                    gcpAuthUrlBox.style.display = 'none';
+                    gcpAuthSuccess.style.display = '';
+                    checkGcpReady();
+                } else {
+                    gcpAuthError.style.display = '';
+                    gcpAuthErrMsg.textContent = data.error || 'Authentication failed';
+                }
+            } catch (e) {
+                gcpAuthError.style.display = '';
+                gcpAuthErrMsg.textContent = 'Failed to verify code';
+            } finally {
+                gcpSubmitCodeBtn.textContent = 'Submit Code';
+                gcpSubmitCodeBtn.disabled = gcpVerifyCode.value.trim().length === 0;
+            }
+        });
+
+        gcpBackBtn.addEventListener('click', () => {
+            if (credsIdx > 0) { credsIdx--; showStep(credsQueue[credsIdx]); }
+            else showStep('provider');
+        });
+        gcpScanBtn.addEventListener('click', advanceCredsOrScan);
+
+        // Cancel / close
         cancelBtn1.addEventListener('click', closePanel);
         closeBtn.addEventListener('click', closePanel);
         overlay.addEventListener('click', closePanel);
 
-        // --- Start Scan ---
+        // ── Start Scan (parallel multi-provider) ──
         async function startScan() {
             showStep('progress');
-            setRingPct(0);
-            scanPhaseText.textContent = 'Starting…';
             scanCancelBtn.style.display = '';
             scanDoneBtn.style.display = 'none';
 
-            const providers = Array.from(selectedProviders);
-            scanProviderLabel.textContent = providers.map(p => p.toUpperCase()).join(', ');
+            // Build per-provider config
+            const providersConfig = [];
+            for (const p of selectedProviders) {
+                const config = { provider: p };
+                if (p === 'aws') {
+                    config.access_key = keyInput.value.trim();
+                    config.secret_key = secretInput.value.trim();
+                    config.regions = Array.from(regionBoxes).filter(cb => cb.checked).map(cb => cb.value);
+                }
+                if (p === 'gcp') {
+                    config.project_ids = [gcpProjectInput.value.trim()];
+                }
+                providersConfig.push(config);
+            }
 
-            const regions = Array.from(regionBoxes).filter(cb => cb.checked).map(cb => cb.value);
-            const body = {
-                provider: providers[0], // prowler runs one provider at a time
-                services: [],
-                regions: regions,
-            };
-            if (selectedProviders.has('aws')) {
-                body.access_key = keyInput.value.trim();
-                body.secret_key = secretInput.value.trim();
+            // Build progress cards
+            const container = document.getElementById('scanProgressCards');
+            container.innerHTML = '';
+            for (const pc of providersConfig) {
+                const icon = providerIcons[pc.provider] || '';
+                const card = document.createElement('div');
+                card.className = 'scan-progress-card';
+                card.innerHTML =
+                    '<div class="scan-card-header">' +
+                        (icon ? '<img src="' + icon + '" class="provider-icon-sm">' : '') +
+                        '<span class="scan-card-provider">' + pc.provider.toUpperCase() + '</span>' +
+                        '<span class="scan-card-pct" id="scanPct_' + pc.provider + '">0%</span>' +
+                    '</div>' +
+                    '<div class="scan-bar"><div class="scan-bar-fill" id="scanFill_' + pc.provider + '"></div></div>' +
+                    '<div class="scan-card-phase" id="scanPhase_' + pc.provider + '">Starting…</div>';
+                container.appendChild(card);
             }
 
             try {
                 const res = await fetch('/scan/start', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(body),
+                    body: JSON.stringify({ providers: providersConfig }),
                 });
                 const data = await res.json();
                 if (data.error) {
-                    scanPhaseText.textContent = 'Error: ' + data.error;
+                    panelTitle.textContent = 'Scan Error';
+                    container.innerHTML = '<div class="scan-card-phase" style="padding:16px">' + data.error + '</div>';
                     scanCancelBtn.style.display = 'none';
                     scanDoneBtn.style.display = '';
                     return;
                 }
             } catch (e) {
-                scanPhaseText.textContent = 'Failed to start scan';
+                panelTitle.textContent = 'Scan Error';
+                container.innerHTML = '<div class="scan-card-phase" style="padding:16px">Failed to start scan</div>';
                 scanCancelBtn.style.display = 'none';
                 scanDoneBtn.style.display = '';
                 return;
@@ -337,40 +512,54 @@
             pollTimer = setInterval(async () => {
                 try {
                     const res = await fetch('/scan/status');
-                    const st = await res.json();
-                    setRingPct(st.progress || 0);
-                    scanPhaseText.textContent = st.phase || 'Working…';
+                    const data = await res.json();
+                    const scans = data.scans || {};
+                    let allDone = true;
+                    let hasError = false;
 
-                    if (!st.running) {
+                    for (const [scanId, st] of Object.entries(scans)) {
+                        const p = st.provider;
+                        const pctEl = document.getElementById('scanPct_' + p);
+                        const fillEl = document.getElementById('scanFill_' + p);
+                        const phaseEl = document.getElementById('scanPhase_' + p);
+
+                        if (pctEl) pctEl.textContent = Math.round(st.progress || 0) + '%';
+                        if (fillEl) {
+                            fillEl.style.width = (st.progress || 0) + '%';
+                            if (st.error) fillEl.style.background = '#ef4444';
+                            else if (!st.running && st.progress >= 100) fillEl.style.background = '#10b981';
+                        }
+                        if (phaseEl) {
+                            let txt = st.phase || 'Working…';
+                            if (st.error) txt = '✗ ' + st.error;
+                            else if (!st.running && st.progress >= 100) txt = '✓ ' + txt;
+                            phaseEl.textContent = txt;
+                        }
+                        if (st.running) allDone = false;
+                        if (st.error) hasError = true;
+                    }
+
+                    if (allDone) {
                         clearInterval(pollTimer);
                         pollTimer = null;
                         scanCancelBtn.style.display = 'none';
                         scanDoneBtn.style.display = '';
-                        if (st.error) {
-                            panelTitle.textContent = 'Scan Error';
-                            scanPhaseText.textContent = st.error;
-                        } else {
-                            panelTitle.textContent = 'Scan Complete';
-                            setRingPct(100);
-                        }
+                        panelTitle.textContent = hasError ? 'Scan Complete (with errors)' : 'Scan Complete';
                     }
-                } catch (e) {
-                    // ignore transient fetch errors
-                }
+                } catch (e) { /* ignore transient */ }
             }, 1500);
         }
 
-        // Cancel scan
+        // Cancel all scans
         scanCancelBtn.addEventListener('click', async () => {
             try { await fetch('/scan/cancel', {method:'POST'}); } catch(e) {}
             if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-            scanPhaseText.textContent = 'Cancelled';
+            panelTitle.textContent = 'Scan Cancelled';
             scanCancelBtn.style.display = 'none';
             scanDoneBtn.style.display = '';
-            panelTitle.textContent = 'Scan Cancelled';
         });
 
-        // Done button — close and reload page to pick up new results
+        // Done — close and reload
         scanDoneBtn.addEventListener('click', () => {
             overlay.classList.remove('open');
             panel.classList.remove('open');
@@ -378,6 +567,14 @@
         });
 
         btn.addEventListener('click', openPanel);
+
+        // Persist environment tag key on change
+        envTagKeyInput.value = localStorage.getItem('envTagKey') || '';
+        envTagKeyInput.addEventListener('change', () => {
+            const val = envTagKeyInput.value.trim();
+            if (val) localStorage.setItem('envTagKey', val);
+            else localStorage.removeItem('envTagKey');
+        });
     })();
     </script>
 </body>
